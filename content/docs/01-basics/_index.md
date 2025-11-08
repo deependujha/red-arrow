@@ -2,7 +2,7 @@
 title: Basics
 type: docs
 prev: docs/
-next: docs/01-basics/01-data/01-dataset-and-dataloader.md
+next: docs/01-basics/01-graph
 sidebar:
   open: true
 ---

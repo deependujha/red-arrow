@@ -1,8 +1,7 @@
 ---
-title: Trainer
+title: PyTorch Compiler Concepts
 type: docs
-prev: docs/
-next: docs/01-basics/01-data/01-dataset-and-dataloader.md
+prev: docs/02-pytorch-compiler
 sidebar:
   open: false
 weight: 11

@@ -1,19 +1,17 @@
 ---
-title: Index
+title: Red Arrow Documentation
+type: docs
 next: docs/01-basics/01-data/
 weight: 1
 ---
 
-This is a demo of the theme's documentation layout.
+- Contains notes and helper codes on PyTorch Compile, CUDA, and Triton.
 
-## Hello, World!
+## Example Code
 
-```go {filename="main.go"}
-package main
+```py {filename="main.py"}
+import torch
 
-import "fmt"
-
-func main() {
-    fmt.Println("Hello, World!")
-}
+def f(x):
+    return torch.sin(x)**2 + torch.cos(x)**2
 ```

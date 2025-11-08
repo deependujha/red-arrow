@@ -1,11 +1,8 @@
 ---
-title: Data
+title: PyTorch Compiler
 type: docs
-prev: docs/
+prev: docs/01-basics/
 next: docs/01-basics/01-data/01-dataset-and-dataloader.md
 sidebar:
-  open: false
-weight: 11
+  open: true
 ---
-
-Pages can be organized into folders.
