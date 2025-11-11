@@ -2,7 +2,7 @@
 title: PyTorch Compiler Concepts
 type: docs
 prev: docs/02-pytorch-compiler
-next: docs/02-pytorch-compiler/01-cuda
+next: docs/02-pytorch-compiler/02-cuda
 sidebar:
   open: false
 weight: 201
