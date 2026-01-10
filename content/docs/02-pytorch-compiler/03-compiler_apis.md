@@ -2,6 +2,7 @@
 title: Compiler APIs
 type: docs
 prev: docs/02-pytorch-compiler/02-cuda
+next: docs/02-pytorch-compiler/04-torchdynamo
 sidebar:
   open: false
 weight: 203
