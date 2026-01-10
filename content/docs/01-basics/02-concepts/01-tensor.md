@@ -146,6 +146,7 @@ t_loaded = torch.load('tensor.pt')
 The key differences between `torch.tensor` and `torch.Tensor`:
 
 **`torch.tensor`** (lowercase 't'):
+
 - A **function** that creates a new tensor from data
 - Always copies the input data
 - Infers the dtype from the input by default
@@ -157,6 +158,7 @@ y = torch.tensor([1.0, 2.0])  # Creates float32 tensor
 ```
 
 **`torch.Tensor`** (uppercase 'T'):
+
 - A **class** (specifically an alias for `torch.FloatTensor`)
 - The default tensor constructor
 - Always creates a float32 tensor
@@ -168,6 +170,7 @@ y = torch.Tensor(3, 4)       # Creates uninitialized 3x4 float32 tensor
 ```
 
 **Practical recommendations:**
+
 - Use `torch.tensor()` when creating tensors from data - it's more intuitive and safer
 - Use `torch.Tensor()` mainly for creating empty tensors of a specific size (though `torch.empty()` is clearer)
 - For explicit dtype control, both support the `dtype` parameter
@@ -186,6 +189,7 @@ b = torch.Tensor(data)   # tensor([1., 2., 3.])  - note the floats!
 The key differences between `view()` and `reshape()`:
 
 **`view()`**:
+
 - Requires the tensor to be **contiguous** in memory
 - Returns a view of the original tensor (shares the same underlying data)
 - Fails if the tensor is not contiguous
@@ -201,6 +205,7 @@ w = z.view(12)        # ❌ RuntimeError: view size is not compatible
 ```
 
 **`reshape()`**:
+
 - Works on **both contiguous and non-contiguous** tensors
 - Returns a view when possible, but copies data if necessary
 - More flexible and safer to use
@@ -213,6 +218,7 @@ w = z.reshape(12)     # ✅ Works! Copies data if needed
 ```
 
 **Checking contiguity:**
+
 ```python
 x = torch.randn(3, 4)
 print(x.is_contiguous())      # True
@@ -223,11 +229,13 @@ print(y.contiguous().is_contiguous())  # True
 ```
 
 **Practical recommendations:**
+
 - Use `reshape()` as the default - it's more robust and handles both cases
 - Use `view()` only when you specifically need to ensure no copying occurs (for performance or memory-sharing reasons)
 - If you get an error with `view()`, either use `reshape()` or call `.contiguous()` first: `x.contiguous().view(...)`
 
 **Memory sharing example:**
+
 ```python
 x = torch.tensor([1, 2, 3, 4])
 y = x.view(2, 2)      # Shares memory
