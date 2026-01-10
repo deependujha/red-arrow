@@ -11,7 +11,7 @@ weight: 201
 ![deep learning compiler](/02-pytorch-compiler/deep_learning_compiler.webp)
 
 > - A deep learning compiler translates high-level code written in deep learning frameworks into optimized lower level hardware specific code to accelerate training and inference.
->
+
 > - It finds opportunities in deep learning models to optimize for performance by performing `layer and operator fusion`, better `memory planning`, and generating target specific `optimized fused kernels` to reduce function call overhead.
 
 ---
