@@ -1,6 +1,6 @@
 # Red Arrow
 
-![pytorch](./docs/images/assets/pytorch-icon.png)
+![pytorch](./static /assets/pytorch-icon.png)
 
 ---
 
