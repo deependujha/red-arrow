@@ -3,7 +3,7 @@ toc: false
 ---
 
 <div style="display: flex; align-items: center;">
-  <img width="75" height="75" src="/assets/pytorch-icon.png" alt="pytorch-icon">
+  <img width="75" height="75" src="./assets/pytorch-icon.png" alt="pytorch-icon">
   <img width="200" height="50" src="/assets/cuda.png" alt="cuda-icon">
   <img width="80" height="80" src="/assets/triton.png" alt="triton-icon">
 </div>
