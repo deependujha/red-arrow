@@ -2,7 +2,7 @@
 title: CUDA C++
 type: docs
 prev: docs/
-next: docs/03-cuda-cpp/01-concepts.md
+next: docs/03-cuda-cpp/01-basics.md
 sidebar:
   open: false
 weight: 300
