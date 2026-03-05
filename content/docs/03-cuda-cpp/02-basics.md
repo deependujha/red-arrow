@@ -277,6 +277,26 @@ For multidimensional blocks: `blockDim.x * blockDim.y * blockDim.z ≤ 1024`.
 - Block sizes should be **multiples of 32** to avoid wasted lanes in the last warp.
 - Common sizes: 128, 256, 512.
 - Recommended block sizes are usually 128–256 threads. Most real kernels use `256`. This gives enough warps per block to keep SMs busy while avoiding resource limits.
+is this section fine:
+
+
+## `Synchronization` between threads
+
+- `__syncthreads()`: synchronizes threads within a block. All threads must reach this point before any can proceed. Useful for coordinating shared memory access.
+
+- example: shift each element to the left by one position within a block:
+
+```cpp
+__global__ void shiftLeft(int* arr, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >0 && idx < N) {
+        int temp = arr[idx];
+        __syncthreads(); // ensure all threads have read their value
+        arr[idx - 1] = temp; // write to left neighbor
+        __syncthreads(); // ensure all threads have written before any read
+    }
+}
+```
 
 ---
 
