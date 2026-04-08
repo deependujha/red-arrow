@@ -18,7 +18,7 @@ markup:
 
 menu:
   main:
-    - name: cuda
+    - name: CUDA
       pageRef: /cuda
       weight: 1
     - name: LLMs
