@@ -18,9 +18,12 @@ markup:
 
 menu:
   main:
-    - name: Docs
-      pageRef: /docs
+    - name: cuda
+      pageRef: /cuda
       weight: 1
+    - name: LLMs
+      pageRef: /llm
+      weight: 2
     - name: Search
       weight: 5
       params:
