@@ -14,6 +14,13 @@ weight: 500
 - These intrinsics are typically faster than their standard counterparts (`expf`, `sinf`, `cosf`, `logf`) because they map more directly to hardware implementations, trading a small amount of accuracy for improved performance.
 - This tradeoff is often acceptable in machine learning and other throughput-oriented workloads.
 
+- `fminf`, `fmaxf`, `fmaf` (x,y,z -> x*y+z), etc for math operations in cuda kernel.
+
+```cpp
+  output[idx] = fmaxf(fminf(input[idx], hi), lo);
+```
+
+
 ---
 
 ## Todo:
