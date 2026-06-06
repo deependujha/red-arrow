@@ -32,6 +32,15 @@ float4* out4 = reinterpret_cast<float4*>(output);
 
 int idx  = blockIdx.x * blockDim.x + threadIdx.x;
 float4 val = in4[idx]; // one 128-bit load (LDG.128 in PTX)
+
+// reading values from `reinterpret_cast` pointer
+float val1 = val.x;
+float val2 = val.y;
+float val3 = val.z;
+float val4 = val.w;
+
+// writing to `reinterpret_cast` pointer at once
+out4[idx] = {1.0f, 2.0f, 3.0f, 4.0f};
 ```
 
 Instead of 4 separate 32-bit loads, you get one 128-bit load. This is one of the most common micro-optimizations in CUDA kernels.
