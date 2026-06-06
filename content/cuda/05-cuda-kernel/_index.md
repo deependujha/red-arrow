@@ -16,6 +16,8 @@ weight: 500
 
 ---
 
+## Todo:
+
 Good place to be — these are exactly the things that separate "I read about CUDA" from "I can actually read kernel code."
 Here's what I'd consider the core vocabulary you need to be fluent in:
 Things you already have
