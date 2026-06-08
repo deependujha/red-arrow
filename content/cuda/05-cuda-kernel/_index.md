@@ -9,15 +9,23 @@ weight: 500
 
 ## Using math functions in CUDA
 
+- Use `cuda::ceil_div` instead of `(totalElements + threadsPerBlock - 1) / threadsPerBlock`.
+
+```cpp
+#include <cuda/std/utility>
+
+// Replaces the older cub::DivideAndRoundUp utility
+int blocksPerGrid = cuda::ceil_div(totalElements, threadsPerBlock); 
+```
 - For `float` computations, prefer CUDA's fast intrinsic functions such as `__expf`, `__sinf`, `__cosf`, and `__logf` when maximum numerical precision is not required. 
 
-- These intrinsics are typically faster than their standard counterparts (`expf`, `sinf`, `cosf`, `logf`) because they map more directly to hardware implementations, trading a small amount of accuracy for improved performance.
-- This tradeoff is often acceptable in machine learning and other throughput-oriented workloads.
+> - These intrinsics are typically faster than their standard counterparts (`expf`, `sinf`, `cosf`, `logf`) because they map more directly to hardware implementations, trading a small amount of accuracy for improved performance.
+> - This tradeoff is often acceptable in machine learning and other throughput-oriented workloads.
 
 - `fminf`, `fmaxf`, `fmaf` (x,y,z -> x*y+z), etc for math operations in cuda kernel.
 
 ```cpp
-  output[idx] = fmaxf(fminf(input[idx], hi), lo);
+  output[idx] = fmaxf(fminf(input[idx], hi), lo); // clamps the value to be between lo and hi
 ```
 
 
