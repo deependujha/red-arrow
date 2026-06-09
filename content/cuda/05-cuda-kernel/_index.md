@@ -33,16 +33,11 @@ int blocksPerGrid = cuda::ceil_div(totalElements, threadsPerBlock);
 
 ## Todo:
 
-Good place to be — these are exactly the things that separate "I read about CUDA" from "I can actually read kernel code."
-Here's what I'd consider the core vocabulary you need to be fluent in:
-Things you already have
+* Grid-stride loops ✅
+* `reinterpret_cast` + vectorized loads ✅
+* Occupancy mental model ✅
+* Memory coalescing ✅
 
-* Grid-stride loops
-* `reinterpret_cast` + vectorized loads
-* Occupancy mental model
-* Memory coalescing
-What's likely still fuzzy
-Shared memory patterns — declaring `__shared__`, tiling (loading a chunk of global memory into smem so a block can reuse it), and why this matters for reducing global memory traffic. You've seen bank conflicts mentioned but probably haven't built the full mental model yet.
 Warp-level primitives — `__shfl_sync`, `__ballot_sync`, `__reduce_add_sync`. These let threads within a warp communicate without shared memory. Reduction kernels live here. Very common in LeetGPU problems.
 Atomic operations — `atomicAdd`, `atomicMax`, `atomicCAS`. When multiple threads write to the same address. `atomicCAS` (compare-and-swap) is the primitive everything else is built on.
 Thread synchronization — `__syncthreads()` vs `__syncwarp()`. When you need one, when you need the other, and what happens if you get it wrong (deadlock or data race).
@@ -59,5 +54,3 @@ Priority order I'd suggest
 5. Memory hierarchy latency numbers (makes profiling readable)
 6. `__launch_bounds__` + Cooperative Groups (polish, useful but not blocking)
 Want to go through these one by one the same way — I explain, you ask questions, then we shape notes? Shared memory + tiling would be the natural next one.
-
-reply back and then we will slowly start learning and being comfortable with them
