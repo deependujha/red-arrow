@@ -37,6 +37,7 @@ int blocksPerGrid = cuda::ceil_div(totalElements, threadsPerBlock);
 * `reinterpret_cast` + vectorized loads ✅
 * Occupancy mental model ✅
 * Memory coalescing ✅
+* Atomic operations — `atomicAdd`, `atomicMax`, `atomicCAS` ✅
 
 Warp-level primitives — `__shfl_sync`, `__ballot_sync`, `__reduce_add_sync`. These let threads within a warp communicate without shared memory. Reduction kernels live here. Very common in LeetGPU problems.
 Atomic operations — `atomicAdd`, `atomicMax`, `atomicCAS`. When multiple threads write to the same address. `atomicCAS` (compare-and-swap) is the primitive everything else is built on.
