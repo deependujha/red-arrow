@@ -75,6 +75,99 @@ float half_warp_val = __shfl_xor_sync(__activemask(), val, 16);
 
 ---
 
+## Match Primitives
+
+Introduced in the Volta architecture, `match primitives allow threads within a warp to instantly map out which other threads are holding the **exact same value** in a specific register`.
+
+Instead of comparing values across threads manually using shared memory loops or multiple shuffle steps, the hardware performs a warp-wide broadcast comparison in a single cycle.
+
+---
+
+## 1. `__match_any_sync`
+
+```cpp
+unsigned int mask = __match_any_sync(unsigned int mask, T value);
+
+```
+
+* **Behavior:** Every thread passes its own `value`. The hardware looks across the warp and returns a 32-bit bitmask to each thread, showing every lane that passed an identical value.
+* **Result:** Threads with the same value get the exact same bitmask. Threads with a unique value get a mask with only their own Lane ID bit set.
+
+### Visual Example
+
+If four threads in a warp pass the following values:
+
+```text
+Lane 0: "Apple"  → returns mask 1001 (Lanes 0 and 3 match)
+Lane 1: "Banana" → returns mask 0010 (Only Lane 1 matches itself)
+Lane 2: "Orange" → returns mask 0100 (Only Lane 2 matches itself)
+Lane 3: "Apple"  → returns mask 1001 (Lanes 0 and 3 match)
+
+```
+
+---
+
+## 2. `__match_all_sync`
+
+```cpp
+unsigned int mask = __match_all_sync(unsigned int mask, T value, int* pred);
+
+```
+
+* **Behavior:** Tests if **every single active thread** in the warp holds the exact same value.
+* **Result:** * If all threads match, it returns the full active `mask` and sets the predicate `pred` to `true` (non-zero).
+* If even one thread diverges, it returns `0` and sets `pred` to `false` (zero).
+
+
+
+---
+
+## Primary Interview Use Case: Warp-Level Aggregation
+
+The absolute classic application for match primitives is **coalescing global atomic updates**.
+
+If multiple threads in a warp want to increment the same index in a global array (e.g., building a histogram or updating a hash table), hitting global memory with 32 distinct `atomicAdd` instructions causes massive serialization.
+
+Using `__match_any_sync`, the warp can group itself by target index, elect a single leader per group to perform one atomic instruction, and scale performance dramatically.
+
+```cpp
+__global__ void aggregate_histogram(int* d_bins, int* d_data, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+
+    int my_bin = d_data[idx]; // The value we want to match on
+
+    unsigned int active = __activemask();
+    // 1. Find all peer threads in this warp updating the SAME bin
+    unsigned int match_mask = __match_any_sync(active, my_bin);
+
+    // 2. Elect a leader (the lowest lane ID in the matching group)
+    int leader_lane = __ffs(match_mask) - 1;
+    int my_lane     = threadIdx.x & 31;
+
+    // 3. Count how many total threads in this warp are hitting this exact bin
+    int num_matches = __popc(match_mask);
+
+    // 4. Only the leader updates global memory for the whole cohort
+    if (my_lane == leader_lane) {
+        atomicAdd(&d_bins[my_bin], num_matches);
+    }
+}
+
+```
+
+---
+
+## Key Hardware Constraints
+
+* **Type Restrictions:** Only supported for 32-bit and 64-bit integer types (`int`, `unsigned int`, `long long`, `unsigned long long`).
+* **Floating-Point Workaround:** To use them on `float` or `double`, you must bit-cast them first using `__float_as_int()` or `reinterpret_cast` to avoid compiler errors.
+
+> [!TIP]
+> Think of `__match_any_sync` as a hardware-accelerated `GROUP BY` clause for a warp. It is highly optimized for irregular data processing patterns like graph algorithms, sparse matrix operations, and database engines.
+
+---
+
 ## Cheat Sheet: Vote vs. Match vs. Shuffle
 
 Here is how all the primitives you listed break down by intent:
@@ -91,7 +184,6 @@ Here is how all the primitives you listed break down by intent:
 | **Shuffle** | `__shfl_up_sync` | `T` (Value from lower lane) | Prefix sums / cumulative scans. |
 | **Shuffle** | `__shfl_xor_sync` | `T` (Value from flipped bit lane) | Butterfly reduction, sorting networks. |
 
-> **Note on `__uni_sync**`: There is no official standard `__uni_sync` primitive in CUDA. If you encounter it in codebases, it is typically a custom helper macro wrapping `__all_sync(mask, pred)` or a shorthand used to check if a predicate is **uniform** across all active threads.
 
 ---
 
