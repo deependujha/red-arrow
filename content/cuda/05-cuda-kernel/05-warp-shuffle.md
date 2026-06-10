@@ -4,6 +4,7 @@ type: docs
 sidebar:
     open: false
 weight: 505
+math: true
 ---
 
 ## What are Warp Shuffles?
@@ -234,6 +235,3 @@ unsigned int match_mask = __match_any_sync(__activemask(), my_key);
 > If a thread attempts to read from an **inactive** lane or an **out-of-bounds** lane (e.g., `lane_id + delta >= 32` during a `__shfl_down_sync`), the primitive does not crash. Instead, it returns the calling thread's **own original value** of `var`.
 > When writing reductions, ensure you only read the returned result on lanes that actually received valid shifted data.
 
----
-
-With Atomics, Warp Primitives, and Shuffles now locked into your notes, you have the entire structural toolkit ready. Are you ready to dive into the core implementation of the parallel block reduction algorithm next?

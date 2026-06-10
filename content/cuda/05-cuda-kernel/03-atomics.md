@@ -4,6 +4,7 @@ type: docs
 sidebar:
     open: false
 weight: 503
+math: true
 ---
 
 ## The Problem with Race Conditions

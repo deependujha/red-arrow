@@ -4,6 +4,7 @@ type: docs
 sidebar:
   open: false
 weight: 501
+math: true
 ---
 
 ## The Problem with Monolithic Kernels
