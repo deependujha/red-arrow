@@ -31,27 +31,19 @@ int blocksPerGrid = cuda::ceil_div(totalElements, threadsPerBlock);
 
 ---
 
-## Todo:
+## `__syncthreads()` v/s `syncwarp()`
 
-* Grid-stride loops ✅
-* `reinterpret_cast` + vectorized loads ✅
-* Occupancy mental model ✅
-* Memory coalescing ✅
-* Atomic operations — `atomicAdd`, `atomicMax`, `atomicCAS` ✅
+| Feature           | `__syncthreads()`                    | `syncwarp()`                         |
+| ----------------- | ------------------------------------ | ------------------------------------ |
+| **Scope**         | All threads in the block (e.g. 1024) | All threads in the warp (32)         |
+| **Barrier Type**  | Block-level                          | Warp-level                           |
+| **Hardware**      | Explicit Block Barrier               | Implicit Warp-Wide Barrier           |
+| **Latency Impact**| Higher latency (waits for full block)  | Lower latency (waits for warp)     |
+| **Hardware Cost** | Higher (transistor-level barrier)    | Lower (implicit execution pipeline)  |
+| **Use Case**      | Block-wide data synchronization      | Warp-wide communication, reductions  |
+| **Error**         | No error on partial participation    | **Undefined** if not all threads sync |
 
-Warp-level primitives — `__shfl_sync`, `__ballot_sync`, `__reduce_add_sync`. These let threads within a warp communicate without shared memory. Reduction kernels live here. Very common in LeetGPU problems.
-Atomic operations — `atomicAdd`, `atomicMax`, `atomicCAS`. When multiple threads write to the same address. `atomicCAS` (compare-and-swap) is the primitive everything else is built on.
-Thread synchronization — `__syncthreads()` vs `__syncwarp()`. When you need one, when you need the other, and what happens if you get it wrong (deadlock or data race).
-Reduction pattern — probably the single most important algorithmic pattern in CUDA. Parallel sum, max, etc. Starts naive, gets progressively optimized through warp shuffles. Shows up everywhere.
-Memory hierarchy mental model — registers → shared memory → L1/L2 cache → global memory, with rough latency numbers attached. Without this, profiling output doesn't make sense.
-`__launch_bounds__` — hints to the compiler about max threads/block and min blocks/SM, affects register allocation. You'll see it in optimized kernels.
-Cooperative Groups — modern replacement for raw `__syncthreads`. Lets you reason about sync at block, warp, or tile granularity explicitly. Newer LeetGPU problems use this.
-Priority order I'd suggest
-
-1. Shared memory + tiling (foundational, everything builds on it)
-2. Reduction pattern (algorithmic core, tests warp primitives + smem together)
-3. Warp shuffles (once you do reduction, shuffles click naturally)
-4. Atomics (simpler, but important for correctness)
-5. Memory hierarchy latency numbers (makes profiling readable)
-6. `__launch_bounds__` + Cooperative Groups (polish, useful but not blocking)
-Want to go through these one by one the same way — I explain, you ask questions, then we shape notes? Shared memory + tiling would be the natural next one.
+> **Key Insight:**
+> `__syncthreads()` forces the entire block (e.g., 1024 threads) to wait. This is computationally expensive because you're waiting for all 1024 threads to arrive, even if only 32 are needed for the synchronization.
+>
+> `syncwarp()` is much cheaper because it only synchronizes within a warp (32 threads). In Volta and later architectures, this synchronization is often implicit, meaning it doesn't require a heavy hardware barrier but is handled by the warp scheduler.

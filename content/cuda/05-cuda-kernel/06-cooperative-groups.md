@@ -3,7 +3,7 @@ title: Cooperative Groups
 type: docs
 sidebar:
 open: false
-weight: 507
+weight: 506
 math: true
 ---
 
