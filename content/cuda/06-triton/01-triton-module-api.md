@@ -1,10 +1,9 @@
 ---
 title: Triton Module APIs
 type: docs
-prev: cuda/06-triton-index
 sidebar:
   open: false
-weight: 610
+weight: 601
 ---
 
 The top-level `triton` module provides the structural decorators and configuration objects necessary to compile, automatically tune, and optimize custom hardware-backed execution routines. 
@@ -13,7 +12,7 @@ The top-level `triton` module provides the structural decorators and configurati
 
 ## Core Module Components
 
-As shown in the official documentation reference from **Screenshot 2026-06-11 at 3.49.58 PM.png**, the root module exposes four essential building blocks:
+![core triton modules](/06-triton/triton-module-apis.png)
 
 ### 1. `@triton.jit`
 * **Purpose:** A decorator used to Just-In-Time (JIT) compile a standard Python function using the Triton compiler chain.
