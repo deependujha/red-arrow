@@ -32,6 +32,54 @@ The top-level `triton` module provides the structural decorators and configurati
 
 ---
 
+## Utility functions
+
+Some of the frequently used utilities in triton are - 
+
+1. **`triton.cdiv(a, b)`**: Ceil division
+2. **`triton.next_power_of_2(n)`**: Next power of 2
+3. **`triton.reinterpret(tensor, dtype)`**: Reinterpret tensor as different type, without changing underlying value (similarly `cpp:reinterpret_cast<>`)
+
+> [!info]
+> https://leetgpu.com/challenges/color-inversion
+> ```python
+> import triton
+> import triton.language as tl
+> 
+> @triton.jit
+> def invert_kernel(
+>     image_ptr,
+>     width, height,
+>     BLOCK_SIZE: tl.constexpr
+> ):
+>     tl.static_assert(BLOCK_SIZE % 4 == 0)
+>     pid = tl.program_id(0)
+>     
+>     # if we hadn't converted at launch, we can do it here using triton.language.to()
+>     # image_ptr = image_ptr.to(tl.pointer_type(tl.uint32))
+> 
+>     offset = BLOCK_SIZE * pid + tl.arange(0, BLOCK_SIZE)
+>     # each thread handles BLOCK_SIZE number pixels, e.g, rgba array
+>     mask = offset < width * height
+>     pixels = tl.load(image_ptr + offset, mask = mask)
+>     pixels = pixels ^ 0x00FFFFFF
+>     tl.store(image_ptr + offset, pixels, mask=mask)
+> 
+> # image_ptr is a raw device pointer
+> def solve(image_ptr: int, width: int, height: int):
+>     BLOCK_SIZE = 64 * 4
+>     n_pixels = width * height
+>     grid = (triton.cdiv(n_pixels, BLOCK_SIZE),)
+>     
+>     kernel = invert_kernel[grid](
+>         triton.reinterpret(image_ptr, tl.uint32), # reinterpret the raw pointer as uint32 before launch
+>         width, height,
+>         BLOCK_SIZE,
+>     )
+> ```
+
+
+
 ## Technical Context: Auto-Tuning & Metaprogramming
 
 Understanding how these primitives work together is essential for writing production-ready code:
