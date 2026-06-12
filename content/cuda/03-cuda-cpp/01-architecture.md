@@ -1,6 +1,7 @@
 ---
 title: CUDA Architecture
 type: docs
+math: true
 prev: docs/
 sidebar:
   open: false

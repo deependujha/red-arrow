@@ -1,6 +1,7 @@
 ---
 title: Triton
 type: docs
+math: true
 prev: cuda/05-cuda-kernel
 sidebar:
   open: false

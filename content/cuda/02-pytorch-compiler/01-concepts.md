@@ -1,6 +1,7 @@
 ---
 title: PyTorch Compiler Concepts
 type: docs
+math: true
 prev: docs/02-pytorch-compiler
 next: docs/02-pytorch-compiler/02-cuda
 sidebar:

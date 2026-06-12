@@ -1,6 +1,7 @@
 ---
 title: Graph Fusion
 type: docs
+math: true
 prev: docs/01-basics/01-graph
 next: docs/01-basics/02-concepts
 sidebar:

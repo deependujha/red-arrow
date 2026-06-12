@@ -1,6 +1,7 @@
 ---
 title: Cooperative Groups
 type: docs
+math: true
 sidebar:
 open: false
 weight: 506

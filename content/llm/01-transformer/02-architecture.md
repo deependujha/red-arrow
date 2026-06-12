@@ -1,6 +1,7 @@
 ---
 title: Architecture
 type: docs
+math: true
 prev: 
 next: 
 sidebar:

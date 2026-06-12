@@ -1,6 +1,7 @@
 ---
 title: Red Arrow Documentation
 type: docs
+math: true
 next: docs/01-basics/01-data/
 weight: 1
 ---

@@ -1,6 +1,7 @@
 ---
 title: reinterpret_cast <>
 type: docs
+math: true
 sidebar:
   open: false
 weight: 502

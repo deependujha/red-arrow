@@ -1,6 +1,7 @@
 ---
 title: Warp-Level Primitives
 type: docs
+math: true
 sidebar:
     open: false
 weight: 504

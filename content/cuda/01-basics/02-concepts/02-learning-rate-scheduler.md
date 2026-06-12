@@ -1,6 +1,7 @@
 ---
 title: Learning Rate Scheduler
 type: docs
+math: true
 prev: docs/01-basics/02-concepts/01-tensor.md
 next: docs/01-basics/02-concepts/03-gradient-clipping.md
 sidebar:

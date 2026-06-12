@@ -1,6 +1,7 @@
 ---
 title: Graph
 type: docs
+math: true
 prev: docs/
 next: docs/01-basics/01-graph/01-graph-fusion.md
 sidebar:

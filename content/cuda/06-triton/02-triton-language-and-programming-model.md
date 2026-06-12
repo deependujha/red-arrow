@@ -1,6 +1,7 @@
 ---
 title: Triton Language & Mental Model
 type: docs
+math: true
 sidebar:
   open: false
 weight: 602

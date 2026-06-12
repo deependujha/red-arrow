@@ -1,6 +1,7 @@
 ---
 title: Compiler APIs
 type: docs
+math: true
 prev: docs/02-pytorch-compiler/02-cuda
 next: docs/02-pytorch-compiler/04-torchdynamo
 sidebar:

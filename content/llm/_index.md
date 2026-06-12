@@ -1,6 +1,7 @@
 ---
 title: LLM Notes
 type: docs
+math: true
 weight: 1
 ---
 

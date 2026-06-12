@@ -1,6 +1,7 @@
 ---
 title: CUDA C++
 type: docs
+math: true
 prev: docs/
 next: docs/03-cuda-cpp/01-basics.md
 sidebar:

@@ -1,6 +1,7 @@
 ---
 title: Warp Shuffles & Advanced Primitives
 type: docs
+math: true
 sidebar:
     open: false
 weight: 505

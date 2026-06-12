@@ -1,6 +1,7 @@
 ---
 title: CUDA kernels
 type: docs
+math: true
 prev: cuda/04-profiler/01-basics.md
 sidebar:
   open: false

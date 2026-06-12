@@ -1,6 +1,7 @@
 ---
 title: Atomic Operations
 type: docs
+math: true
 sidebar:
     open: false
 weight: 503

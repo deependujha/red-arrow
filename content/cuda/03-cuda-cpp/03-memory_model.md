@@ -1,6 +1,7 @@
 ---
 title: CUDA Memory Model
 type: docs
+math: true
 prev: docs/
 sidebar:
   open: false

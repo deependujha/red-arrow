@@ -1,6 +1,7 @@
 ---
 title: Mixed Precision Training
 type: docs
+math: true
 prev: docs/01-basics/02-concepts/05-gradient-accumulation.md
 sidebar:
   open: false

@@ -1,6 +1,7 @@
 ---
 title: Transfer Learning
 type: docs
+math: true
 prev: docs/01-basics/02-concepts/03-gradient-clipping.md
 next: docs/01-basics/02-concepts/05-gradient-accumulation.md
 sidebar:

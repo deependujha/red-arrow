@@ -1,10 +1,10 @@
 ---
 title: CUDA memory & launch bounds
 type: docs
+math: true
 sidebar:
 open: false
 weight: 507
-math: true
 ---
 
 ## 1. CUDA Memory Hierarchy & Latency

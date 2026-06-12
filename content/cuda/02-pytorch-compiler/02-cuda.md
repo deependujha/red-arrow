@@ -1,6 +1,7 @@
 ---
 title: CUDA APIs
 type: docs
+math: true
 prev: docs/02-pytorch-compiler/01-concepts
 next: docs/02-pytorch-compiler/03-compiler_apis
 sidebar:

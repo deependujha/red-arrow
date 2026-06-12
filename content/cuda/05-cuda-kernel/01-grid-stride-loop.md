@@ -1,6 +1,7 @@
 ---
 title: Grid-Stride Loop
 type: docs
+math: true
 sidebar:
   open: false
 weight: 501

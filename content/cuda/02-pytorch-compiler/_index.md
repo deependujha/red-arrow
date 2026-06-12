@@ -1,6 +1,7 @@
 ---
 title: PyTorch Compiler
 type: docs
+math: true
 prev: docs/
 next: docs/02-pytorch-compiler/01-concepts.md
 sidebar:

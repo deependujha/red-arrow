@@ -1,6 +1,7 @@
 ---
 title: Gradient Accumulation
 type: docs
+math: true
 prev: docs/01-basics/02-concepts/04-transfer-learning.md
 next: docs/01-basics/02-concepts/06-mixed-precision-training.md
 sidebar:
