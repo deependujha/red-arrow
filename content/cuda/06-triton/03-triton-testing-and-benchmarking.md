@@ -146,9 +146,11 @@ def benchmark(SIZE, provider):
 # Running this command prints a beautifully formatted Markdown table 
 # and automatically saves a line plot image to your local directory!
 if __name__ == '__main__':
-    benchmark.run(print_data=True, show_plots=True)
-
+    benchmark.run(print_data=True, show_plots=True, save_path=".")
 ```
+
+![benchmark](/06-triton/vector-add-performance.png)
+> dummy graph, ignore it. just for visualization, and it looks cool :)
 
 ---
 
@@ -161,7 +163,3 @@ if __name__ == '__main__':
 | **`do_bench_cudagraph`** | Eliminates CPU-side launch overhead from timing calculations via CUDA Graphs. |
 | **`do_bench_proton`** | Captures execution speed along with deep Triton Proton profiling metrics. |
 | **`perf_report` / `Benchmark**` | Automates sweeping sizes/configs to spit out markdown tables and line graphs of performance scaling. |
-
-You are now fully locked and loaded on the theory, syntax, language constraints, and verification tools.
-
-Which kernel out of your 17 are you planning to tackle first?
