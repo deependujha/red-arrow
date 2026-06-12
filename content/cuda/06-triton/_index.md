@@ -72,3 +72,44 @@ Whether written in standard Triton or low-level Gluon, the execution undergoes a
 > If asked about performance tuning in Triton, you can now confidently say:
 >
 > *"While standard Triton automates memory and warp scheduling perfectly for most tasks, if I hit a bottleneck with memory stalls or poor tensor core layouts, I can drop into Triton’s **Gluon layer** to explicitly manage layouts and warp specialization."*
+
+```python
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def sum_kernel(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, N: int, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offset = block_start + tl.arange(0, BLOCK_SIZE)
+
+    mask = offset < N
+
+    a_val = tl.load(a + offset, mask=mask)
+    b_val = tl.load(b + offset, mask=mask)
+    c_val = a_val + b_val
+
+    tl.store(c + offset, c_val, mask=mask)
+
+
+
+
+def main():
+    N = 4096
+    a = torch.randn(N, device="cuda")
+    b = torch.randn(N, device="cuda")
+    c = torch.empty(N, device="cuda")
+
+    BLOCK_SIZE = tl.constexpr(256)
+    # grid = (triton.cdiv(N, BLOCK_SIZE.value),)
+    grid = lambda meta: (triton.cdiv(N, meta['BLOCK_SIZE']),)
+
+    sum_kernel[grid](a, b, c, N, BLOCK_SIZE=BLOCK_SIZE)
+
+    triton.testing.assert_close(c, a + b)
+
+
+if __name__ == "__main__":
+    main()
+```
