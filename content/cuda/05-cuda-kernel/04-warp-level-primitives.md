@@ -5,7 +5,6 @@ math: true
 sidebar:
     open: false
 weight: 504
-math: true
 ---
 
 ## The Core Concept: Active vs. Inactive Threads

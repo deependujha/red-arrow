@@ -5,7 +5,6 @@ math: true
 sidebar:
 open: false
 weight: 506
-math: true
 ---
 
 ## The Core Philosophy: Why Cooperative Groups Exist

@@ -5,7 +5,6 @@ math: true
 sidebar:
     open: false
 weight: 505
-math: true
 ---
 
 ## What are Warp Shuffles?

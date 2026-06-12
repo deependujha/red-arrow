@@ -5,7 +5,6 @@ math: true
 sidebar:
   open: false
 weight: 502
-math: true
 ---
 
 ## What It Does
