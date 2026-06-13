@@ -94,6 +94,17 @@ mask = offsets < N
 data = tl.load(ptr + offsets, mask=mask)
 ```
 
+### `tl.where` for Conditional Computation
+
+- `tl.where(cond, a, b)`
+
+```python
+# Example: ReLU activation
+x = tl.load(x_ptr + offsets, mask=mask)
+y = tl.where(x > 0, x, 0)  # ReLU:
+tl.store(y_ptr + offsets, y, mask=mask)
+```
+
 ---
 
 ## Difference b/w `tensor.to(dtype)` and `tensor.to(tl.pointer_type(dtype))`
