@@ -3,44 +3,53 @@ title: Triton & PyTorch Integration
 type: docs
 math: true
 sidebar:
-  open: false
+    open: false
 weight: 604
 ---
 
 ## Why `torch.autograd.Function` Exists
 
-PyTorch can automatically compute gradients for operations it understands. However, when we launch a custom Triton kernel, PyTorch has no idea how gradients should be computed.
+PyTorch automatically computes gradients for native operations using a built-in graph. However, when you launch a custom Triton kernel, PyTorch cannot inspect the compiled GPU code to determine how gradients flow.
 
 ```python
+# Native PyTorch: Differentiable automatically
 y = x * x
-y.backward() # because multiplication already has a registered backward implementation.
+y.backward() 
 
-y = my_triton_kernel(x) # PyTorch has no idea how gradients should be computed.
+# Custom Triton Kernel: PyTorch does not know how to compute gradients
+y = my_triton_kernel(x) 
+
 ```
 
-`torch.autograd.Function` is the mechanism that allows us to teach PyTorch how to differentiate through custom operations.
+`torch.autograd.Function` acts as the bridge, allowing you to explicitly teach PyTorch's autograd engine how to differentiate through custom Triton operations.
 
 ---
 
-## High Level Architecture
+## High-Level Architecture
+
+The custom `Function` maps high-level PyTorch graph nodes directly to your optimized hardware kernels:
 
 ```text
-Model
-  ↓
-PyTorch Autograd
-  ↓
-torch.autograd.Function
-  ↓
-Triton Forward Kernel
-Triton Backward Kernel
-```
+       Model Graph
+            │
+            ▼
+    PyTorch Autograd
+            │
+            ▼
+ torch.autograd.Function
+      ╱           ╲
+     ▼             ▼
+Triton Forward   Triton Backward
+    Kernel            Kernel
 
-The custom `Function` acts as a bridge between PyTorch's autograd engine and Triton's GPU kernels.
+```
 
 ---
 
 ## Basic Structure
 
+Custom autograd layers inherit from `torch.autograd.Function`. They require a static `forward` method and a static `backward` method.
+
 ```python
 import torch
 
@@ -48,1036 +57,360 @@ class MyOp(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x):
+        # 1. Allocate output tensors
+        # 2. Launch Triton forward kernel
+        # 3. Save state for backward pass using ctx
         y = ...
         return y
 
     @staticmethod
     def backward(ctx, grad_output):
+        # 1. Retrieve saved context tensors
+        # 2. Launch Triton backward kernel
+        # 3. Calculate and return input gradients
         grad_x = ...
         return grad_x
+
 ```
 
-Usage:
+> **CRITICAL:** Always invoke custom autograd functions using the `.apply()` method. Never instantiate the class directly.
 
 ```python
+# Correct
 y = MyOp.apply(x)
-```
 
-**Important:** Custom autograd functions are invoked through `.apply()`, not by creating an instance.
+# Incorrect
+y = MyOp()(x)
+
+```
 
 ---
 
-## The Context Object (`ctx`)
+## Managing Context via `ctx`
 
-The `ctx` object allows data to be shared between forward and backward passes.
+The `ctx` (context) object acts as a scratchpad to pass information from the forward pass to the backward pass.
 
-### Saving tensors
+### 1. Saving Tensors
+
+Use `ctx.save_for_backward` to track tensors involved in the gradient formula.
 
 ```python
 ctx.save_for_backward(x, y)
+
 ```
 
-Retrieving later:
+Retrieve them during the backward pass via `ctx.saved_tensors`:
 
 ```python
 x, y = ctx.saved_tensors
+
 ```
 
-### Saving metadata
+### 2. Saving Arbitrary Metadata
+
+Non-tensor values (like Python scalars, dimensions, or hyperparameters) must be attached directly to `ctx` as attributes.
 
 ```python
 ctx.block_size = 1024
 ctx.dropout_p = 0.1
-```
 
-This is useful for kernel launch parameters or configuration values that are needed during backward.
+```
 
 ---
 
-## Triton Forward Integration
+## End-to-End Triton Integration Pattern
 
-A typical forward implementation launches a Triton kernel:
+### The Forward Pass
+
+The forward pass is responsible for configuring kernel dimensions, preparing output allocations, and launching the Triton kernel grid.
 
 ```python
 class MyOp(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x):
-
         y = torch.empty_like(x)
-
+        grid = lambda meta: (triton.cdiv(x.numel(), meta['BLOCK_SIZE']),)
+        
         my_forward_kernel[grid](
-            x,
-            y,
-            ...
+            x, y, x.numel(), BLOCK_SIZE=1024
         )
-
+        
         ctx.save_for_backward(x)
-
         return y
+
 ```
 
-Forward is responsible for:
+### The Backward Pass
 
-1. Launching Triton kernels.
-2. Producing output tensors.
-3. Saving information required for gradient computation.
+The backward pass receives incoming upstream gradients ($grad\_output$, representing $\frac{\partial L}{\partial y}$) and computes downstream gradients ($\frac{\partial L}{\partial x}$).
+
+```python
+    @staticmethod
+    def backward(ctx, grad_output):
+        (x,) = ctx.saved_tensors
+        grad_x = torch.empty_like(x)
+        grid = lambda meta: (triton.cdiv(x.numel(), meta['BLOCK_SIZE']),)
+        
+        my_backward_kernel[grid](
+            x, grad_output, grad_x, x.numel(), BLOCK_SIZE=1024
+        )
+        
+        return grad_x
+
+```
 
 ---
 
-## Triton Backward Integration
+## Mapping Inputs to Outputs
 
-Backward receives gradients from the next layer:
+The number of arguments returned by `backward()` must **exactly match** the number of arguments accepted by `forward()` (excluding `ctx`).
+
+* If an input variable requires a gradient, return its calculated tensor.
+* If an input variable is non-differentiable (like metadata or integer flags), return `None`.
 
 ```python
 @staticmethod
+def forward(ctx, x, weight, bias, block_size):
+    ...
+    return y
+
+@staticmethod
 def backward(ctx, grad_output):
+    ...
+    # Must return 4 elements matching the 4 forward inputs
+    return grad_x, grad_weight, grad_bias, None
 
-    (x,) = ctx.saved_tensors
-
-    grad_x = torch.empty_like(x)
-
-    my_backward_kernel[grid](
-        x,
-        grad_output,
-        grad_x,
-        ...
-    )
-
-    return grad_x
 ```
 
-`grad_output` represents:
-
-```text
-dL/dy
-```
-
-where:
-
-```text
-L = final loss
-y = output of this operation
-```
-
-The backward kernel computes:
-
-```text
-dL/dx
-```
-
-using the chain rule.
+> [!important]
+> **`Why do we need to match no. of forward method arguments with no. of backward method return? first we do forward then backward, so shouldn't it be opposite?`**
+> 
+> Every return value from the `backward()` method corresponds to the gradient of a specific input variable from the `forward()` method.
+> 
+> Think of your forward pass as a mathematical function $f(x, w, b)$ that takes three inputs and produces an output $y$.
+> 
+> During training, the loss function calculates a final error $L$. When PyTorch runs backpropagation, its goal is to update **every single input variable** that contributed to that loss. To do that, it needs to find the gradient for each input:
+> 
+> 1. How does changing $x$ affect $L$? (We need $\frac{\partial L}{\partial x}$)
+> 2. How does changing $w$ affect $L$? (We need $\frac{\partial L}{\partial w}$)
+> 3. How does changing $b$ affect $L$? (We need $\frac{\partial L}{\partial b}$)
+> 
+> Because your forward pass took **three** variables, your backward pass must return **three** gradients.
 
 ---
 
-## Mapping Forward Inputs to Backward Returns
+### How PyTorch Matches Them Under the Hood
 
-Every input of `forward()` requires a corresponding return value from `backward()`.
+PyTorch doesn't use variable names to match gradients to inputs; it uses **positional order**.
 
-Example:
+If your forward pass looks like this:
 
 ```python
 @staticmethod
 def forward(ctx, x, weight, bias):
-    ...
-```
-
-Backward must return:
-
-```python
-return grad_x, grad_weight, grad_bias
-```
-
-If an argument is non-differentiable:
-
-```python
-return grad_x, None, None
-```
-
-The number of returned values must exactly match the number of forward inputs.
-
----
-
-## Typical Wrapper Pattern
-
-Users generally should not call `.apply()` directly.
-
-Instead, create a Python wrapper:
-
-```python
-class MyOp(torch.autograd.Function):
+    # Position 0: x
+    # Position 1: weight
+    # Position 2: bias
     ...
 
-def my_op(x):
-    return MyOp.apply(x)
 ```
 
-Usage:
+PyTorch's autograd engine expects the `backward()` method to return a tuple where the items line up exactly with those exact same positions:
 
 ```python
-y = my_op(x)
+@staticmethod
+def backward(ctx, grad_output):
+    ...
+    # Position 0 matches x
+    # Position 1 matches weight
+    # Position 2 matches bias
+    return grad_x, grad_weight, grad_bias
+
 ```
 
-This is the pattern used by many Triton projects including Unsloth.
+### What happens if an input doesn't change (like a configuration flag)?
+
+Even if a forward input is a static configuration flag (like `block_size = 1024`) that doesn't have a gradient, PyTorch *still* requires you to pass a placeholder back to keep the positions aligned. You simply pass `None`.
+
+```python
+@staticmethod
+def forward(ctx, x, block_size):
+    ...
+
+@staticmethod
+def backward(ctx, grad_output):
+    ...
+    return grad_x, None  # None tells PyTorch "block_size has no gradient"
+
+```
+
+If the number of returns didn't match the number of inputs, PyTorch wouldn't know which gradient belonged to which variable, and the autograd engine would break.
 
 ---
 
-## Example: Custom Cross Entropy
+## The Wrapper Pattern
 
-A common implementation structure:
+To hide the internal `.apply()` semantics from end users, always wrap your autograd function in a clean Python definition. This mirrors the pattern used by production libraries like Unsloth and FlashAttention.
 
 ```python
-class FastCrossEntropy(torch.autograd.Function):
-
+class _FastLinear(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, logits, labels):
-
-        losses = ...
-
-        triton_cross_entropy_forward[grid](
-            logits,
-            losses,
-            ...
-        )
-
-        ctx.save_for_backward(
-            logits,
-            logsumexp,
-            labels,
-        )
-
-        return losses
-
+    def forward(ctx, x, w): ...
+    
     @staticmethod
-    def backward(ctx, grad_losses):
+    def backward(ctx, grad): ...
 
-        logits, logsumexp, labels = \
-            ctx.saved_tensors
+# User-facing API
+def fast_linear(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    return _FastLinear.apply(x, weight)
 
-        triton_cross_entropy_backward[grid](
-            logits,
-            grad_losses,
-            logsumexp,
-            labels,
-            ...
-        )
-
-        return grad_logits, None
 ```
 
----
-
-## Why Save Intermediate Results?
-
-Many operations compute expensive intermediate values.
-
-Cross entropy is a good example:
-
-```text
-softmax(x) = exp(x - logsumexp(x))
-```
-
-Computing:
-
-```text
-logsumexp(x)
-```
-
-requires a reduction across the vocabulary dimension.
-
-Instead of recomputing it during backward, we can save it:
+Integrating this wrapper into standard deep learning code is straightforward using `torch.nn.Module`:
 
 ```python
-ctx.save_for_backward(logsumexp)
-```
-
-and reuse it later.
-
-Benefits:
-
-* Less computation
-* Faster backward pass
-* Lower memory bandwidth usage
-
-This is one of the most common optimization techniques in custom autograd implementations.
-
----
-
-## In-place Gradient Buffers
-
-A common performance pattern is:
-
-```python
-grad_x = torch.empty_like(x)
-```
-
-and letting the Triton kernel write directly into the output buffer.
-
-```python
-my_backward_kernel[grid](
-    x,
-    grad_output,
-    grad_x,
-)
-```
-
-This avoids unnecessary allocations and copies.
-
----
-
-## Relationship with `nn.Module`
-
-`autograd.Function` is not a layer.
-
-It only defines differentiation rules.
-
-For reusable layers, combine it with `nn.Module`.
-
-```python
-class MyLayer(torch.nn.Module):
+class CustomLinearLayer(torch.nn.Module):
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.randn(out_features, in_features))
 
     def forward(self, x):
-        return MyOp.apply(x)
-```
+        return fast_linear(x, self.weight)
 
-Typical hierarchy:
-
-```text
-nn.Module
-    ↓
-autograd.Function
-    ↓
-Triton Kernels
 ```
 
 ---
 
-## Checklist for Custom Triton Ops
+## Memory vs. Compute Optimization Trade-offs
 
-1. Write Triton forward kernel.
-2. Write Triton backward kernel.
-3. Create `torch.autograd.Function`.
-4. Save tensors needed for backward.
-5. Return gradients for every forward input.
-6. Wrap `.apply()` in a user-facing function.
-7. Validate using:
+When writing Triton kernels, the largest performance gains come from optimizing memory bandwidth rather than computing operations. Consider a Custom Cross-Entropy loss implementation:
 
-```python
-torch.autograd.gradcheck(...)
-```
+$$\text{softmax}(x)_i = \exp(x_i - \text{logsumexp}(x))$$
 
-before using in production.
+You face a fundamental design decision regarding how to handle intermediate states:
 
----
+| Strategy | Implementation Profile | Memory Footprint | Compute Profile |
+| --- | --- | --- | --- |
+| **Naive Saving** | `ctx.save_for_backward(softmax_tensor)` | High ($B \times S \times V$) | Fast backward pass. |
+| **Smart Saving** | `ctx.save_for_backward(logsumexp_tensor)` | Low ($B \times S$) | Recomputes softmax values in-place inside the backward Triton kernel using the small saved profile. |
 
-## Mental Model
+### Rule of Thumb for LLMs
 
-Think of `torch.autograd.Function` as the contract between PyTorch and Triton:
-
-```text
-PyTorch:
-"How do I compute gradients?"
-
-Your Function:
-"Run this Triton backward kernel."
-
-PyTorch:
-"Which tensors do you need?"
-
-Your Function:
-"Use the tensors I saved during forward."
-```
-
-Without `torch.autograd.Function`, PyTorch can execute Triton kernels but cannot differentiate through them.
-
-I'd add a separate page later on **gradcheck**, **higher-order gradients**, and **memory-saving techniques (`ctx.mark_non_differentiable`, recomputation vs save_for_backward, custom AMP)** because those start showing up quickly in real Triton contributions.
+> **Save small reductions; recompute large activations.** Memory bandwidth is almost always the bottleneck on modern GPUs. Recomputing values like element-wise activations inside a Triton block is significantly faster than reading large matrices back out of High Bandwidth Memory (HBM).
 
 ---
 
-# Advanced Triton + PyTorch Autograd
+## Advanced Autograd Features
 
-## Gradcheck, Higher-Order Gradients, and Memory Optimization
+### 1. `ctx.needs_input_grad`
 
-Once a custom Triton operation works, the next challenge is ensuring it is:
-
-1. Correct
-2. Differentiable
-3. Memory efficient
-4. Compatible with the PyTorch ecosystem
-
-This page covers the most important concepts beyond basic `torch.autograd.Function`.
-
----
-
-# 1. Verifying Gradients with `gradcheck`
-
-A backward kernel can easily be wrong while appearing to work during training.
-
-PyTorch provides a numerical gradient checker:
+Avoid wasting GPU cycles calculating gradients for parameters that do not need them (e.g., when `frozen_layer` or `requires_grad=False` is active).
 
 ```python
-torch.autograd.gradcheck(...)
+@staticmethod
+def backward(ctx, grad_output):
+    grad_x, grad_weight = None, None
+    
+    # Only execute kernels if PyTorch requests the gradient
+    if ctx.needs_input_grad[0]:
+        grad_x = launch_input_kernel(grad_output)
+    if ctx.needs_input_grad[1]:
+        grad_weight = launch_weight_kernel(grad_output)
+        
+    return grad_x, grad_weight
+
 ```
 
-which compares:
+### 2. `ctx.mark_non_differentiable`
 
-```text
-Analytical Gradient
-(from your backward kernel)
-
-vs
-
-Numerical Gradient
-(finite differences)
-```
-
----
-
-## Example
-
-Suppose:
-
-```python
-y = x²
-```
-
-Then:
-
-```text
-dy/dx = 2x
-```
-
-PyTorch can verify your implementation automatically.
-
-```python
-import torch
-
-x = torch.randn(
-    10,
-    dtype=torch.float64,
-    requires_grad=True,
-)
-
-torch.autograd.gradcheck(
-    MySquare.apply,
-    (x,),
-)
-```
-
-Expected:
-
-```text
-True
-```
-
----
-
-## Why Double Precision?
-
-Finite differences are sensitive to numerical error.
-
-Always use:
-
-```python
-dtype=torch.float64
-```
-
-for gradcheck.
-
-Using FP16 or BF16 usually produces meaningless results.
-
----
-
-## Common Gradcheck Failures
-
-### Wrong derivative
-
-Forward:
-
-```python
-y = x * x
-```
-
-Backward:
-
-```python
-return grad_output * x
-```
-
-Correct answer should be:
-
-```python
-return grad_output * 2 * x
-```
-
-Gradcheck immediately detects this.
-
----
-
-### Incorrect tensor shape
-
-Forward input:
-
-```python
-x.shape = (128,)
-```
-
-Backward output:
-
-```python
-grad_x.shape = (64,)
-```
-
-Autograd will fail.
-
-Gradient tensors must exactly match input shapes.
-
----
-
-### Missing gradients
-
-Forward:
-
-```python
-forward(ctx, x, weight)
-```
-
-Backward:
-
-```python
-return grad_x
-```
-
-Wrong.
-
-Must return:
-
-```python
-return grad_x, grad_weight
-```
-
-or:
-
-```python
-return grad_x, None
-```
-
-if the parameter is not differentiable.
-
----
-
-# 2. Higher-Order Gradients
-
-Most training only requires:
-
-```text
-First derivative
-```
-
-Example:
-
-```text
-dL/dx
-```
-
-Some algorithms require:
-
-```text
-Second derivative
-```
-
-or even higher.
-
-Examples:
-
-* Meta-learning
-* Implicit layers
-* PINNs
-* Some optimization research
-
----
-
-## First Derivative
-
-```python
-y = x**2
-```
-
-Gradient:
-
-```python
-grad = torch.autograd.grad(
-    y,
-    x,
-    create_graph=True,
-)
-```
-
-Result:
-
-```text
-2x
-```
-
----
-
-## Second Derivative
-
-```python
-second_grad = torch.autograd.grad(
-    grad,
-    x,
-)
-```
-
-Result:
-
-```text
-2
-```
-
----
-
-## Problem with Most Triton Ops
-
-Most custom Triton operations only implement:
-
-```python
-forward()
-backward()
-```
-
-which gives:
-
-```text
-First-order gradients only
-```
-
-Second derivatives will fail because PyTorch cannot differentiate through your backward kernel.
-
----
-
-## How PyTorch Builtins Handle It
-
-For operations like:
-
-```python
-torch.exp()
-torch.sin()
-torch.softmax()
-```
-
-PyTorch also knows how to differentiate the backward pass itself.
-
-This is why higher-order gradients work automatically.
-
----
-
-## Practical Advice
-
-For most Triton kernels:
-
-```text
-Forward + Backward
-```
-
-is sufficient.
-
-Only implement higher-order gradients when a real use case requires them.
-
----
-
-# 3. Memory vs Compute Tradeoff
-
-One of the biggest design decisions:
-
-```text
-Save Intermediate Results
-          vs
-Recompute Intermediate Results
-```
-
----
-
-## Saving Everything
-
-Forward:
-
-```python
-ctx.save_for_backward(
-    x,
-    y,
-    z,
-    softmax,
-    logsumexp,
-)
-```
-
-Advantages:
-
-```text
-Fast backward
-```
-
-Disadvantages:
-
-```text
-High memory usage
-```
-
----
-
-## Recomputation
-
-Forward:
-
-```python
-ctx.save_for_backward(x)
-```
-
-Backward:
-
-```python
-softmax = recompute_softmax(x)
-```
-
-Advantages:
-
-```text
-Low memory usage
-```
-
-Disadvantages:
-
-```text
-More computation
-```
-
----
-
-## Example: Cross Entropy
-
-Common approach:
-
-Save:
-
-```python
-logsumexp
-```
-
-instead of:
-
-```python
-softmax
-```
-
-because:
-
-```text
-softmax = exp(x - logsumexp)
-```
-
-can be reconstructed cheaply.
-
-This reduces memory usage significantly.
-
----
-
-# 4. `ctx.mark_non_differentiable`
-
-Sometimes outputs should never receive gradients.
-
-Example:
-
-```python
-indices = torch.argmax(x)
-```
-
-Indices are integers.
-
-Gradients do not make sense.
-
-Tell autograd:
-
-```python
-ctx.mark_non_differentiable(indices)
-```
-
-Example:
+If your Triton kernel generates secondary discrete values (like top-k indices or boolean masks), explicitly mark them to eliminate autograd tracking overhead.
 
 ```python
 @staticmethod
 def forward(ctx, x):
-
-    values, indices = ...
-
+    values, indices = launch_custom_topk_kernel(x)
     ctx.mark_non_differentiable(indices)
-
+    ctx.save_for_backward(indices)
     return values, indices
+
 ```
 
-Benefits:
+### 3. Automatic Mixed Precision (AMP) Support
 
-* Less memory
-* Less autograd overhead
-* Clearer semantics
-
----
-
-# 5. `ctx.needs_input_grad`
-
-Backward often computes gradients for every input:
+Ensure your custom operation handles mixed-precision types gracefully by decorating your methods with PyTorch's AMP decorators.
 
 ```python
-grad_x
-grad_w
-grad_b
-```
-
-But maybe only:
-
-```python
-x.requires_grad = True
-```
-
-and:
-
-```python
-weight.requires_grad = False
-```
-
-PyTorch exposes:
-
-```python
-ctx.needs_input_grad
-```
-
-Example:
-
-```python
-if ctx.needs_input_grad[0]:
-    compute_grad_x()
-
-if ctx.needs_input_grad[1]:
-    compute_grad_weight()
-```
-
-Benefits:
-
-* Less computation
-* Faster backward
-
----
-
-# 6. Avoid Saving Huge Tensors
-
-Bad:
-
-```python
-ctx.save_for_backward(
-    logits,
-    probabilities,
-    softmax,
-    exp_logits,
-)
-```
-
-Memory explodes for:
-
-```text
-Batch Size × Sequence Length × Vocabulary
-```
-
-especially in LLM training.
-
-Prefer:
-
-```python
-ctx.save_for_backward(
-    logits,
-    logsumexp,
-)
-```
-
-and reconstruct when possible.
-
-Rule of thumb:
-
-```text
-Save small reductions,
-recompute large activations.
-```
-
----
-
-# 7. Mixed Precision Considerations
-
-Many Triton kernels run in:
-
-```text
-FP16
-BF16
-```
-
-But gradients are often accumulated in:
-
-```text
-FP32
-```
-
-Example:
-
-```python
-x = tl.load(...)
-x = x.to(tl.float32)
-```
-
-Common pattern:
-
-```text
-Load FP16
-Compute FP32
-Store FP16
-```
-
-to improve numerical stability.
-
----
-
-# 8. Custom AMP Support
-
-For Automatic Mixed Precision (AMP), custom ops can be annotated.
-
-Modern PyTorch provides:
-
-```python
-torch.amp.custom_fwd
-torch.amp.custom_bwd
-```
-
-Example:
-
-```python
-class MyOp(torch.autograd.Function):
-
+class MyAMPBlock(torch.autograd.Function):
     @staticmethod
     @torch.amp.custom_fwd(device_type="cuda")
     def forward(ctx, x):
-        ...
+        # Runs safely within autocast environments (FP16/BF16)
+        return launch_kernel(x)
 
     @staticmethod
     @torch.amp.custom_bwd(device_type="cuda")
-    def backward(ctx, grad):
-        ...
+    def backward(ctx, grad_output):
+        return launch_grad_kernel(grad_output)
+
 ```
-
-Benefits:
-
-* Proper autocast handling
-* Better integration with AMP training
 
 ---
 
-# 9. Common Performance Pattern
+## Validating Gradients with `gradcheck`
 
-A high-performance Triton op usually follows:
+A backward kernel can contain subtle mathematical bugs that still allow models to run without throwing structural errors. Always validate your math using numerical differentiation checks.
+
+`torch.autograd.gradcheck` compares your **analytical gradients** (from your Triton backward kernel) against **numerical gradients** (calculated via finite differences).
+
+```python
+import torch
+
+# 1. ALWAYS use float64. Lower precision types (FP16/BF16/FP32) 
+# fail gradcheck due to numerical instability in finite differences.
+x = torch.randn(4, 4, dtype=torch.float64, requires_grad=True)
+
+# 2. Run the check
+is_correct = torch.autograd.gradcheck(MyOp.apply, (x,), eps=1e-6, atol=1e-4)
+print(f"Gradient verification passed: {is_correct}")
+
+```
+
+### Common Gradcheck Failure Points
+
+* **Shape Mismatches:** The shape returned by `backward` must be identical to the shape of the tensor passed into `forward`.
+* **Missing Elements:** Returning `None` when an input tensor actually has `requires_grad=True`.
+* **Incorrect Scale Factors:** Forgetting a scalar multiplier (e.g., missing a $2\times$ or a $\frac{1}{N}$ scaling parameter in the gradient chain rule).
+
+---
+
+## Implementation Checklist
+
+* [ ] Write Triton forward kernel.
+* [ ] Write Triton backward kernel using in-place writing to output buffers (`torch.empty_like`) to avoid temporary allocations.
+* [ ] Create your `torch.autograd.Function` wrapper class.
+* [ ] Profile and select memory-saving vs compute trade-offs via `ctx.save_for_backward`.
+* [ ] Match all `forward` parameters to `backward` gradient returns.
+* [ ] Test numerical correctness using `torch.autograd.gradcheck` in `float64`.
+* [ ] Verify outputs exactly match native PyTorch baseline values using `torch.testing.assert_close`.
+
+---
+
+## Mental Model Summary
 
 ```text
-Forward
- ├─ Compute output
- ├─ Save minimal state
- └─ Return result
+       PyTorch Architecture                       Your Kernel Responsibility
+┌────────────────────────────────┐            ┌────────────────────────────────┐
+│  "Hey, I need to know how to   │            │ "No problem, here is the exact │
+│   differentiate this block."   │───────────>│  Triton backward kernel rules."│
+└────────────────────────────────┘            └────────────────────────────────┘
+                                                              │
+                                                              ▼
+┌────────────────────────────────┐            ┌────────────────────────────────┐
+│ "What raw context parameters   │            │ "Just hold onto these small    │
+│  do you need me to save?"      │<───────────│  reductions I gave you earlier"│
+└────────────────────────────────┘            └────────────────────────────────┘
 
-Backward
- ├─ Load saved state
- ├─ Reconstruct cheap intermediates
- ├─ Launch Triton kernel
- └─ Return gradients
 ```
 
-The goal is:
-
-```text
-Minimal Saved Memory
-+
-Minimal Recomputation
-+
-Correct Gradients
-```
-
----
-
-# Debugging Checklist
-
-When a custom Triton operation behaves incorrectly:
-
-### Step 1
-
-Verify forward output:
-
-```python
-torch.testing.assert_close(...)
-```
-
-against a PyTorch reference implementation.
-
----
-
-### Step 2
-
-Run:
-
-```python
-torch.autograd.gradcheck(...)
-```
-
----
-
-### Step 3
-
-Compare backward output:
-
-```python
-custom_grad
-```
-
-against:
-
-```python
-reference_grad
-```
-
-from native PyTorch.
-
----
-
-### Step 4
-
-Benchmark:
-
-```python
-Forward latency
-Backward latency
-Peak memory
-```
-
-Only then evaluate whether the custom kernel is actually an improvement.
-
----
-
-# Mental Model
-
-```text
-Beginner:
-Save everything
-
-Intermediate:
-Save only expensive-to-recompute values
-
-Advanced:
-Choose the optimal point on the
-memory ↔ compute tradeoff curve
-for your workload
-```
-
-Most high-performance Triton kernels are not just faster because of better GPU code—they are faster because they carefully choose what to save and what to recompute during backward.
+Without a custom `torch.autograd.Function`, Triton operates outside PyTorch's awareness. With it, your optimized kernels become fully integrated elements of the neural network graph.
