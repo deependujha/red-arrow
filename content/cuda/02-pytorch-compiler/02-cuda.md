@@ -101,14 +101,62 @@ Used when juggling multiple streams (parallel GPU work).
 
 ## **Streams**
 
+- To create a new stream, use `torch.cuda.Stream()` and use context manager `with torch.cuda.stream(s):` to enqueue ops on this stream.
+
 ```python
 s = torch.cuda.Stream()
 with torch.cuda.stream(s):
     ... # enqueue ops on this stream
 ```
 
-Manual GPU scheduling. Interview gold if you can explain when you'd use it
-(e.g., overlap env step + inference in RL).
+> [!TIP]
+> after with block is completed, it doesn't mean gpu operations are completed. It simply means, all the gpu tasks have been queued on stream, and you need to specifically ensure synchronisation before accessing the results.
+
+- To get the current active CUDA stream in PyTorch, use **`torch.cuda.current_stream()`**. If you haven't explicitly set a custom stream, this function automatically returns the **default stream** (also known as the legacy stream or Stream 0) for your current GPU device.
+
+```python
+import torch
+
+# Ensure CUDA is available
+if torch.cuda.is_available():
+    # 1. Get the current active stream
+    current_stream = torch.cuda.current_stream()
+    print(current_stream)
+    # Output example: <torch.cuda.Stream device=cuda:0 id=0x0>
+
+    # 2. Check its properties
+    print(f"Device: {current_stream.device}")
+    print(f"CUDA pointer/handle: {current_stream.cuda_stream}")
+
+    # 3. Verify it is the default stream
+    default_stream = torch.cuda.default_stream()
+    print(f"Is current stream the default? {current_stream == default_stream}")
+    # Output: True
+
+```
+
+---
+
+### Important Multi-GPU Gotcha
+
+`torch.cuda.current_stream()` is **device-specific**. If you are working on a multi-GPU machine and switch devices, you must pass the device index (or a `torch.device` object) to get the correct stream for that specific card.
+
+```python
+# Get the active stream for GPU 1 instead of the default GPU 0
+gpu_1_stream = torch.cuda.current_stream(device=1) 
+
+```
+
+### Context: Why this matters for Triton
+
+In Triton, kernels are submitted directly to a CUDA stream. When you launch a Triton kernel without explicitly specifying a stream, Triton automatically sniffs out whatever `torch.cuda.current_stream()` is active at that millisecond and queues your kernel there.
+
+If you ever need to pass it explicitly to a raw driver call or external library, you use `.cuda_stream`:
+
+```python
+# Raw underlying CUDA stream pointer integer
+stream_handle = torch.cuda.current_stream().cuda_stream 
+```
 
 ---
 
