@@ -640,4 +640,3 @@ A strong interview answer should include:
 A concise summary:
 
 > Streams provide concurrency. Events provide coordination. High-performance CUDA systems minimize CPU synchronization and express dependencies directly on the GPU.
-
