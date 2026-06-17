@@ -9,22 +9,14 @@ weight: 604
 
 ## Why `torch.autograd.Function` Exists
 
-PyTorch can automatically compute gradients for operations it understands:
+PyTorch can automatically compute gradients for operations it understands. However, when we launch a custom Triton kernel, PyTorch has no idea how gradients should be computed.
 
 ```python
 y = x * x
-y.backward()
+y.backward() # because multiplication already has a registered backward implementation.
+
+y = my_triton_kernel(x) # PyTorch has no idea how gradients should be computed.
 ```
-
-because multiplication already has a registered backward implementation.
-
-However, when we launch a custom Triton kernel, PyTorch only sees:
-
-```python
-y = my_triton_kernel(x)
-```
-
-and has no idea how gradients should be computed.
 
 `torch.autograd.Function` is the mechanism that allows us to teach PyTorch how to differentiate through custom operations.
 
