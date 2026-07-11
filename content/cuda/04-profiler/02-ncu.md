@@ -67,6 +67,8 @@ if __name__ == "__main__":
     main()
 ```
 
+![ncu sample](/04-profiler/ncu-sample.png)
+
 Differences from the nsys script:
 - **single forward pass** in the capture range (see replay note above)
 - no `emit_nvtx()` — that was for per-op attribution on the nsys timeline; ncu targets kernels by name, and emit_nvtx just adds overhead here. Keep plain `nvtx.range_push` though — it enables `--nvtx-include` filtering.
