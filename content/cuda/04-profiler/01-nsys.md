@@ -15,7 +15,7 @@ weight: 401
 ```python
 """command:
 nsys profile \
-  --trace cuda,nvtx,cudnn,cublas,osrt \
+  --trace cuda,nvtx,cublas,osrt \
   --capture-range cudaProfilerApi \
   --capture-range-end stop \
   --output deependu_nsys_profile_report \
@@ -32,7 +32,7 @@ class SimpleModel(nn.Module):
         self.layers = nn.Sequential(
             nn.Linear(8, 16),
             nn.ReLU(),
-            nn.Linear(16, 1)
+            nn.Linear(16, 8)
         )
 
     def forward(self, x):
@@ -42,7 +42,7 @@ class SimpleModel(nn.Module):
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 def main():
-    model = SimpleModel().to(device)
+    model = torch.compile(SimpleModel(),mode="max-autotune-no-cudagraphs").to(device)
     inputs = torch.randn(4, 8).to(device)
 
     with torch.inference_mode():
@@ -51,7 +51,7 @@ def main():
             model(inputs)
         torch.cuda.synchronize()
 
-        with torch.cuda.profiler.profile():
+        with torch.cuda.profiler.profile(), torch.autograd.profiler.emit_nvtx():
             for step in range(5):
                 torch.cuda.nvtx.range_push(f"step_{step}")
                 _ = model(inputs)
@@ -67,7 +67,17 @@ if __name__ == "__main__":
 
 ## Profiling a PyTorch Script with `nsys`
 
-### 1. Annotate PyTorch Code with NVTX
+### 1. Emit every autograd kernel as an NVTX range
+
+```python
+with torch.autograd.profiler.emit_nvtx():
+    for step in range(5):
+        torch.cuda.nvtx.range_push(f"step_{step}")
+        _ = model(inputs)
+        torch.cuda.nvtx.range_pop()
+```
+
+### 2. Annotate PyTorch Code with NVTX
 
 Adding NVTX ranges makes the timeline far easier to read — each range appears as a labelled band on the CPU row, aligned with the GPU kernels it launched.
 
@@ -111,7 +121,7 @@ for step in range(5):
     torch.cuda.nvtx.range_pop()  # step_N
 ```
 
-### 2. Mark the Start and End of the Profiling Session
+### 3. Mark the Start and End of the Profiling Session
 
 - There're multiple way to mark the start and end of the profiling session. All of them are equivalent, and basically doing the same thing: calling `cudaProfilerStart()` and `cudaProfilerStop()` under the hood.
 
