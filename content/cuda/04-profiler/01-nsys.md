@@ -20,6 +20,12 @@ nsys profile \
   --capture-range-end stop \
   --output deependu_nsys_profile_report \
   python main.py
+
+--- if using nsys & cudagraph (you want tracing at node level, as it will just show one op)
+nsys profile --cuda-graph-trace=node \
+  --trace cuda,nvtx,cublas,osrt \
+  --capture-range cudaProfilerApi --capture-range-end stop \
+  --output compile-reduce-overhead-nodes python main.py
 """
 
 import torch
