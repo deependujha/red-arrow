@@ -46,6 +46,9 @@ Key mental model: **PTX is a virtual ISA; SASS is the real ISA.** Everything els
 
 > ISA: `Instruction Set Architecture` — the set of instructions a processor understands. e.g., `add.f32`, `ld.global.f32`, `mma.sync` are all SASS instructions.
 
+> **ELF (Executable and Linkable Format)** — the standard Linux container format for compiled code (executables, .o, .so); holds machine code + symbols + metadata in named sections. NVIDIA reuses it for GPU code: a cubin is just an ELF file whose "machine code" is SASS.
+> - ELF is never executed — it's a container that a loader (OS kernel for CPU binaries, CUDA driver for cubins) unpacks; the processor only ever executes the raw machine code (x86/SASS) that was inside
+
 ---
 
 ## 2. PTX (Parallel Thread eXecution)
