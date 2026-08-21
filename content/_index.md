@@ -28,6 +28,19 @@ toc: false
 - NVFuser
 - Modular (mojo)
 
+---
+
+## Companies
+
+- Luminal AI
+- Roboflow
+- Nous Research
+- Makora AI
+- Modular AI
+- PoolSide AI
+- Mercor AI
+
+---
 
 > [!NOTE]
 > Useful information that users should know, even when skimming content.
