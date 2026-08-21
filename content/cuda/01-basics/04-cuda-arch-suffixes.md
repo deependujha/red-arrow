@@ -11,6 +11,8 @@ sidebar:
 
 > [!NOTE] CUDA Architecture Suffixes: `a`, `f`, and the `compute_/sm_` Namespaces
 > `a` = architecture-specific, `f` = family
+> - suffixes (`f` & `a`) was introduced from **`Hopper series (9.x)`**
+
 
 Companion notes to the binary-toolchain doc. Covers arch-specific (`a`) and family (`f`) suffixes, why they exist on *both* the virtual and real side, compatibility rules, and the "why would anyone embed PTX for an `a` arch at all?" question.
 
@@ -135,8 +137,6 @@ cuobjdump -lptx libfoo.so    # if compute_100a shows up HERE, someone embedded p
 That last line is the practical audit for the question in [Q4](#4-why-would-anyone-embed-compute_100a-ptx-sass-only-would-be-the-same-but-faster): `compute_100a` appearing in `-lptx` output is dead weight; `sm_100a` in `-lelf` output is fine and intended.
 
 - Trying on tesla T4:
-```bash
-- suffixes (`f` & `a`) was introduced from hopper series (9.x)
 
 ```bash
 nvcc main.cu -o meow \

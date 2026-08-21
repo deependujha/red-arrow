@@ -348,7 +348,7 @@ nsys profile --trace=cuda,nvtx,osrt --force-overwrite=true --output=occupancy_st
 
 > A Tesla T4 SM can physically hold a maximum of 32 active warps simultaneously, so if there're 8 warps per block, a single SM can hold at max (32/8=4) blocks simultaneously. For 1024 threads per block, a single SM can hold at max (32/32=1) block simultaneously.
 
-> [!INFO]
+> [!TIP]
 > - **Registers Per Thread**: In both runs, it says 16. Even though we wrote a bunch of code variables to force register pressure, the NVCC compiler is incredibly smart. It looked at the math, realized many variables were just intermediate steps, and aggressively optimized them away, packing everything into just 16 registers per thread.
 
 > [!CAUTION]

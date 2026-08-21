@@ -160,7 +160,7 @@ def solve(image_ptr: int, width: int, height: int):
 
 ### Vectorization Optimization via Alignment
 
-> [!info]
+> [!TIP]
 > An interviewer might ask: *"How do you guarantee coalesced/vectorized memory access in Triton?"*
 >
 > **Answer:** By using `tl.multiple_of(ptr, 16)`. This informs the compiler backend that the pointer base address is 16-byte aligned. Armed with this guarantee, the compiler can issue wider memory instructions (e.g., loading 4 floats at once via a single instruction) instead of breaking the block loading process down into sluggish single-element memory transactions.

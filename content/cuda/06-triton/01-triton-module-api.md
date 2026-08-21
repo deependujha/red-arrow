@@ -41,7 +41,7 @@ Some of the frequently used utilities in triton are -
 2. **`triton.next_power_of_2(n)`**: Next power of 2
 3. **`triton.reinterpret(tensor, dtype)`**: Reinterpret tensor as different type, without changing underlying value (similarly `cpp:reinterpret_cast<>`)
 
-> [!info]
+> [!TIP]
 > https://leetgpu.com/challenges/color-inversion
 > ```python
 > import triton
