@@ -131,7 +131,24 @@ cuobjdump -lelf libfoo.so    # cubins are labeled with real arch: look for sm_10
 cuobjdump -lptx libfoo.so    # if compute_100a shows up HERE, someone embedded pointless PTX
 ```
 
+
 That last line is the practical audit for the question in [Q4](#4-why-would-anyone-embed-compute_100a-ptx-sass-only-would-be-the-same-but-faster): `compute_100a` appearing in `-lptx` output is dead weight; `sm_100a` in `-lelf` output is fine and intended.
+
+- Trying on tesla T4:
+```bash
+- suffixes (`f` & `a`) was introduced from hopper series (9.x)
+
+```bash
+nvcc main.cu -o meow \
+        -gencode arch=compute_75,code=sm_75,compute_75 \
+        -gencode arch=compute_90a,code=sm_90a,compute_90a \
+        -gencode arch=compute_89,code=sm_89
+```
+- and then verify with:
+```bash
+cuobjdump -lelf meow
+cuobjdump -lptx meow
+```
 
 ---
 
