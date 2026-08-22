@@ -30,11 +30,25 @@ TORCH_LOGS=output_code python train.py    # see the Triton source Inductor gener
 
 ```python {filename="Triton, in-process"}
 compiled = add_kernel[(grid,)](x, y, out, n, BLOCK=1024)
+with open('alpha_triton_PTX.ptx', 'w') as f:
+    print(compiled.asm['ptx'], file=f)
 print(compiled.asm["ptx"])
 print(compiled.n_regs, compiled.n_spills)   # the numbers PTX itself won't tell you
 ```
 
-> [!TIP]
+---
+
+> [!TIP] get `n_regs` and `n_spills` from PTX
+>
+> ```bash
+> ptxas -v kernel.ptx -o kernel.cubin
+> ```
+> 
+> - it'll output something like: ` 0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads`
+
+
+
+> [!CAUTION]
 > Always dump **both** PTX and SASS for anything you care about. PTX answers *"what did the compiler decide to do?"*; SASS answers *"what will the machine do?"*. They disagree more often than you'd expect — most visibly around unrolling, predication, and register allocation.
 
 ---
@@ -515,9 +529,9 @@ The same works for Triton: dump PTX for two autotune configs and diff them to se
 
 > [!NOTE] **`.ftz` (Flush-To-Zero)**
 > 
-> **`.ftz`** tells the GPU to treat **subnormal (denormal) `f32` values as zero**. Subnormals are values smaller than the smallest positive *normal* `f32` (`≈ 1.175 × 10⁻³⁸`) and exist to provide gradual underflow near zero.
+> **`.ftz`** tells the GPU to treat **subnormal (denormal) `f32` values as zero**. Subnormals are values smaller than the smallest positive *normal* `f32` ($\approx 1.175 \times 10^{-38}$) and exist to provide gradual underflow near zero.
 > 
-> With `.ftz`, subnormal inputs/results are flushed to `±0.0` instead of being preserved. This can improve performance on hardware where subnormal arithmetic is expensive, at the cost of losing precision for extremely small values.
+> With `.ftz`, subnormal inputs/results are flushed to $\pm 0.0$ instead of being preserved. This can improve performance on hardware where subnormal arithmetic is expensive, at the cost of losing precision for extremely small values.
 > 
 > ```ptx
 > mul.f32      %f2, %f0, %f1;   // preserves subnormals
