@@ -335,7 +335,7 @@ Triton's PTX comes out of the **LLVM NVPTX backend**, not NVVM, and it looks dif
 .address_size 64
 
 .visible .entry add_kernel(...)
-.maxntid 128, 1, 1                        // ← num_warps=4 → 128 threads. Always present.
+.reqntid 128, 1, 1                        // ← num_warps=4 → 128 threads. Always present.
 ```
 
 Structural differences from nvcc output:
@@ -343,12 +343,24 @@ Structural differences from nvcc output:
 | | nvcc | Triton |
 |---|---|---|
 | Kernel name | C++ mangled | plain Python function name |
-| `.maxntid` | only with `__launch_bounds__` | **always** (`num_warps × 32`) |
+| `.reqntid` | only with `__launch_bounds__` | **always** (`num_warps × 32`) |
 | Register declarations | modest | often hundreds — one block = many registers per thread |
 | Masking | branches or predicates | almost always **predicated** `@%p` loads/stores |
 | Loops | mirror your `for` | often fully unrolled by `BLOCK_SIZE` |
 | Barriers | where you wrote them | `bar.sync 0` inserted by the layout/pipeliner |
 | Shared memory | your `__shared__` | `.shared .align 16 .b8 global_smem[N];` — one arena Triton sub-allocates |
+
+> [!IMPORTANT]
+> `blockdim` in CUDA & `BLOCKSIZE` in Triton are **not the same**. Triton uses `BLOCK_SIZE` to mean "elements per block", not "threads per block".
+> The compiler then chooses a `num_warps` and derives the thread count from that. If you see `reqntid 128,1,1` for a `BLOCK_SIZE=1024`, that means 128 threads are each processing 8 elements.
+> ```python
+> compiled = add_kernel[(grid,)](x, y, out, n, BLOCK=1024, num_warps=8)
+> ```
+> - with `num_warps=8`, so total threads = 8 warps × 32 threads/warp = 256 threads. Each thread processes BLOCK_SIZE / total_threads = 1024 / 256 = 4 elements.
+>
+> - Even though in triton, we write kernel on block level, but ptx is lowered to thread level instruction. Since in above case, each thread needs to process 4/8 elements (depending on `num_warps`), so we will see vectorized load/store in ptx (`.v4`).
+>
+> - if each threads has to process 8 elements, it can at max vectorize 4 elements, so we will have 2 vectorized load/store instructions (`.v4`), and idx will be incremented by `BLOCK_SIZE/2` (i.e. 512) for next vectorized load/store instruction.
 
 ### A masked, vectorized Triton load
 
