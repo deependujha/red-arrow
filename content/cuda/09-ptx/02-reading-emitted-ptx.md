@@ -430,6 +430,8 @@ nvcc -lineinfo -src-in-ptx -ptx k.cu     # CUDA source lines as comments inside 
 
 `.loc <file> <line> <col>` is the same metadata Nsight Compute uses for its Source page. Triton emits `.loc` too (disable with `TRITON_DISABLE_LINE_INFO=1` if the noise gets in the way), which is how you map a hot SASS line back to a line of Python.
 
+> `.loc` is a PTX debug directive, not an executable instruction. It associates generated PTX instructions with source locations for debugging/profiling. It does not generate a SASS instruction.
+
 ---
 
 ## 8. The review checklist
@@ -450,6 +452,15 @@ Run down this list every time you open a PTX dump for performance reasons:
 | Barrier count sane? | `bar.sync` | one per real dependency, not per layout shuffle |
 | Loop unrolled? | repeated bodies between labels | matches your `#pragma unroll` intent |
 | Constant folding? | literals vs runtime math | shapes known at compile time became immediates |
+
+> `div.rn` v/s `div.approx` is a common source of confusion. The table below summarizes the differences:
+|                                              | `div.rn`                            | `div.approx`              |
+| -------------------------------------------- | ----------------------------------- | ------------------------- |
+| Accuracy                                     | High / correctly rounded            | Approximate               |
+| IEEE rounding guarantee                      | Yes                                 | No                        |
+| Typical use                                  | Numerical correctness               | Performance-tolerant math |
+| Can use reciprocal approximation internally? | Compiler may optimize where allowed | Explicitly allowed        |
+
 
 ---
 
@@ -501,6 +512,20 @@ The same works for Triton: dump PTX for two autotune configs and diff them to se
 ### Q: How do you tell from PTX alone whether a kernel was compiled with `-use_fast_math`?
 
 **Answer:** Look at the transcendental and division opcodes. Fast math turns `div.rn.f32` into `div.approx.f32`, `sqrt.rn.f32` into `sqrt.approx.f32`, and expands `expf`/`log`/`sin` into `ex2.approx.f32` / `lg2.approx.f32` / `sin.approx.f32` sequences — often preceded by a multiply by a magic constant like `0f3FB8AA3B` ($\log_2 e$). It also adds `.ftz` to many f32 ops (denormals flushed) and makes FMA contraction more aggressive. The `.approx`/`.ftz` modifiers are the tell; they're a modifier, not a separate instruction, so grep for them rather than for instruction names.
+
+> [!NOTE] **`.ftz` (Flush-To-Zero)**
+> 
+> **`.ftz`** tells the GPU to treat **subnormal (denormal) `f32` values as zero**. Subnormals are values smaller than the smallest positive *normal* `f32` (`≈ 1.175 × 10⁻³⁸`) and exist to provide gradual underflow near zero.
+> 
+> With `.ftz`, subnormal inputs/results are flushed to `±0.0` instead of being preserved. This can improve performance on hardware where subnormal arithmetic is expensive, at the cost of losing precision for extremely small values.
+> 
+> ```ptx
+> mul.f32      %f2, %f0, %f1;   // preserves subnormals
+> mul.ftz.f32  %f2, %f0, %f1;   // flushes subnormals to ±0.0
+> ```
+> 
+> - **Mental model:** `.ftz` = *“I don't care about values this tiny; treat them as zero.”*
+
 
 ### Q: Why does Triton PTX put `mov.u32 %r1, 0x0;` before a predicated load, and what breaks if you write `tl.load(p, mask=m)` with no `other`?
 
