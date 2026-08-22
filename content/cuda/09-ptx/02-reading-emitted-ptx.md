@@ -131,19 +131,36 @@ Five things to internalize from this one kernel:
 4. **The byte offset `%rd5` is computed once and reused** for `a`, `b`, and `c`. Common-subexpression elimination is visible at the PTX level.
 5. **Load order is reversed** (`b` before `a`). PTX ordering is not execution ordering; ptxas reschedules anyway.
 
-### The same kernel with `__restrict__ const`
+### The same kernel with `const __restrict__`
 
 ```cpp
-__global__ void vecAdd(const float* __restrict__ a, const float* __restrict__ b,
-                       float* __restrict__ c, int n)
+__global__ void vecAdd(
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    float* __restrict__ c,
+    int n
+)
 ```
+
+The `const` + `__restrict__` qualifiers give the compiler stronger information about the input pointers:
+
+* **`const`** → this kernel does not write through `a` or `b`.
+* **`__restrict__`** → accesses through `a`, `b`, and `c` are assumed not to alias. (no other pointer in the kernel argument points to same address, so, writing to any other pointer cannot change the value of `*a` or `*b`. So, we can pre-load values from `a` and `b` and keep them in registers without worrying about them being changed by a write through `c`.)
+
+That extra information can allow `nvcc` to generate read-only-cache loads:
 
 ```ptx
-    ld.global.nc.f32  %f1, [%rd8];    // .nc appears
-    ld.global.nc.f32  %f2, [%rd6];
+ld.global.nc.f32  %f1, [%rd8]; // .nc appears
+ld.global.nc.f32  %f2, [%rd6];
 ```
 
-`.nc` = **non-coherent**: routed through the read-only data cache (the texture path, `LDG` in SASS). The compiler will only do this when it can prove the data isn't written by this kernel — which is what `const __restrict__` (or an explicit `__ldg`) tells it. **This is one of the highest-value things PTX shows you**, because the C++ change is invisible and the SASS difference is real.
+Here, **`.nc` means non-coherent**: the **`load uses the read-only/texture cache path`** (corresponding to `LDG`-style loads in SASS `__ldg`), rather than the normal global-load path.
+
+The important point is that **`__restrict__` itself does not mean "use `.nc`"**. It gives the compiler aliasing information; `const` gives it read-only information; together they may enable this optimization (and the compiler may choose it or not depending on architecture and optimization).
+
+> [!IMPORTANT] **PTX insight:**
+> - C++ qualifiers such as `const` and `__restrict__` usually disappear from PTX as explicit syntax, but their effects can survive as different instructions such as `ld.global.nc`. This is a good example of how examining PTX can reveal optimizations that aren't obvious from the original C++.
+> - The compiler's decision to use `.nc` depends on its analysis and the target architecture/compiler; don't treat `.nc` as a mechanical proof that `const __restrict__` was present.
 
 ---
 
@@ -259,8 +276,35 @@ Idioms worth memorizing:
 | `vote.sync.ballot.b32` | `__ballot_sync` |
 | `activemask.b32` | `__activemask()` |
 
+> [!IMPORTANT] Understanding ptx instruction `shfl.sync.down`
+> ```
+> shfl.sync.down.b32 %f2|%p3, %f1, 16, 31, -1;
+> ```
+> - `-1 is __activemask() = 0xffffffff`
+> - `31` is the clamp/segmask (the maximum lane index to read from).
+> - and this is what it means in C++:
+> ```cpp
+> source_lane = lane_id + 16;
+> 
+> if (source_lane <= 31) {
+>     f2 = value_of_f1_from(source_lane);
+>     p3 = true;
+> } else {
+>     p3 = false;
+> }
+> ```
+
+
 > [!TIP]
 > **`atom` vs `red`**: `atom` returns the old value, `red` does not. If you write `atomicAdd(p, v);` and ignore the result, the compiler emits `red`, which does not need a round-trip and is meaningfully faster. If you see `atom` where you expected `red`, someone is capturing a return value they don't need.
+>
+> **`atom` (Atomic Operation)**
+> - Performs the operation at the memory address and **returns the previous value** to a register.
+> - Requires a destination register: `atom.global.add.u32 d, [a], b;` — `d` receives the old value.
+>
+> **`red` (Reduction Operation)**
+> - Performs the operation at the memory address **without returning the old value**.
+> - No destination register needed: `red.global.add.u32 [a], b;`
 
 ---
 
@@ -366,7 +410,7 @@ acc = tl.dot(a, b, acc)      # a: (128,64) fp16, b: (64,256) fp16
 | sm_90a | `wgmma.mma_async.sync.aligned.m64n256k16.f32.f16.f16` + `wgmma.fence` / `wgmma.commit_group` / `wgmma.wait_group` | operands via **shared-memory descriptors**, not registers |
 | sm_100a | `tcgen05.mma.cta_group::1.kind::f16` + `tcgen05.alloc` / `tcgen05.ld` / `tcgen05.commit` | accumulator lives in **tensor memory**, not registers |
 
-If you see plain `fma.rn.f32` in a loop where you expected `mma`, `tl.dot` fell back to FMA — usually because a dimension was below the minimum tile (`M`, `N` ≥ 16 and `K` ≥ 16), the dtype isn't tensor-core-supported, or `allow_tf32`/input precision settings forced it. Note 04 covers the whole family.
+If you see plain `fma.rn.f32` in a loop where you expected `mma`, `tl.dot` fell back to FMA — usually because a dimension was below the minimum tile (`M`, `N` ≥ 16 and `K` ≥ 16), the dtype isn't tensor-core-supported, or `allow_tf32`/input precision settings forced it. [Note 04](/cuda/09-ptx/04-compute-and-tensor-cores.md) covers the whole family.
 
 ---
 

@@ -116,8 +116,9 @@ unsigned int mask = __match_all_sync(unsigned int mask, T value, int* pred);
 ```
 
 * **Behavior:** Tests if **every single active thread** in the warp holds the exact same value.
-* **Result:** * If all threads match, it returns the full active `mask` and sets the predicate `pred` to `true` (non-zero).
-* If even one thread diverges, it returns `0` and sets `pred` to `false` (zero).
+* **Result:**
+    * If all threads match, it returns the full active `mask` and sets the predicate `pred` to `true` (1).
+    * If even one thread diverges, it returns `0` and sets `pred` to `false` (0).
 
 
 
