@@ -7,7 +7,7 @@ sidebar:
 weight: 903
 ---
 
-This is the note that makes Hopper and Blackwell kernels readable. Everything modern — TMA, warp specialization, clusters, `tcgen05` — is built out of the primitives here.
+This is the note that makes **`Hopper (9.x)`** and **`Blackwell(10.x)`** kernels readable. Everything modern — TMA, warp specialization, clusters, `tcgen05` — is built out of the primitives here.
 
 ```mermaid
 graph TD
