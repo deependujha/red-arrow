@@ -8,151 +8,146 @@ sidebar:
   open: false
 ---
 
+> [!NOTE] The one-line version
+> You don't "use" L1/L2 the way you use shared memory. You arrange **access patterns and reuse** so the hardware naturally produces useful cache behavior — and only then reach for the few explicit knobs that do exist.
 
-> **You don't directly "use" L1/L2 like shared memory. You arrange your memory accesses so the hardware naturally gets useful cache behavior.**
-
-With shared memory, you explicitly say:
+With shared memory, you say exactly what lives where:
 
 ```cpp
-__shared__ float tile[...];
+__shared__ float tile[BLOCK_M][BLOCK_K];
 ```
 
-With L1/L2, you mostly say:
+With L1/L2, you mostly just say:
 
 ```cpp
 x = input[idx];
 ```
 
-and then **access pattern + reuse + cache policy** determine whether the request hits L1, L2, or HBM.
+and **access pattern + reuse distance + cache policy** decide whether that request is served by L1, L2, or HBM.
 
 ---
 
-# 1. The hierarchy you already know
-
-Think:
+## 1. The hierarchy
 
 ```text
-                 SM
-                  │
-             ┌────┴────┐
-             │ Registers│
-             └────┬────┘
-                  │
-              L1 / SMEM
-                  │
-                  ▼
-                 L2
-                  │
-                  ▼
-              HBM / VRAM
+              SM
+               │
+        ┌──────┴──────┐
+        │  Registers  │   per-thread, compiler-allocated
+        └──────┬──────┘
+               │
+        ┌──────┴──────┐
+        │  L1 / SMEM  │   per-SM, one physical SRAM, split two ways
+        └──────┬──────┘
+               │
+        ┌──────┴──────┐
+        │     L2      │   device-wide, shared by all SMs
+        └──────┬──────┘
+               │
+        ┌──────┴──────┐
+        │  HBM / VRAM │
+        └─────────────┘
 ```
 
-The rough latency/capacity relationship is:
+Rough ordering (numbers are order-of-magnitude, not spec):
 
-```text
-register   → tiny, extremely fast
-L1         → small, very fast
-shared     → small, very fast, explicitly managed
-L2         → larger, slower
-HBM        → huge, much slower
-```
+| Level | Scope | Latency | Capacity | Managed by |
+|---|---|---|---|---|
+| Register | thread | ~1 cycle | 255 regs/thread max | compiler |
+| Shared | thread block | ~20–30 cycles | tens of KB / SM | **you** |
+| L1 | SM | ~30 cycles | tens of KB / SM | hardware |
+| L2 | whole GPU | ~200 cycles | several MB–tens of MB | hardware (+ a persistence hint) |
+| HBM | whole GPU | ~400–800 cycles | GBs | — |
 
-But there's an important distinction:
+The distinction that matters:
 
-### Registers / shared memory
+- **Registers / shared memory** — you control allocation and lifetime explicitly.
+- **L1 / L2** — hardware-managed. Your job is to create access patterns that make caching effective.
 
-**You explicitly control allocation and usage.**
+### L1 and shared memory are the same SRAM
 
-### L1 / L2
+Since Volta, L1 and shared memory are one unified block per SM, split at runtime. Asking for more shared memory leaves less L1, and vice versa:
 
-**Hardware-controlled caches.**
+| Arch | Unified L1+SMEM per SM | Max shared per block |
+|---|---|---|
+| Volta (sm_70) | 128 KB | 96 KB |
+| Turing (sm_75) | 96 KB | 64 KB |
+| Ampere A100 (sm_80) | 192 KB | 164 KB |
+| Ampere GA10x / Ada (sm_86/89) | 128 KB | 100 KB |
+| Hopper (sm_90) | 256 KB | 227 KB |
 
-Your job is to create access patterns that make caching effective.
+The split can be nudged with `cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, pct)`, and dynamic shared memory beyond the default opt-in limit requires `cudaFuncAttributeMaxDynamicSharedMemorySize`.
+
+### L1 is not coherent, L2 is
+
+L1 is private to an SM and **not** coherent with other SMs' L1s. L2 is the device-wide coherence point for global memory — every SM's misses funnel through it. This is why cross-block communication has to go through global memory (i.e. L2), and why an `atomicAdd` on a hot address serializes at an L2 slice.
 
 ---
 
-# 2. What does "using L1" actually mean?
+## 2. Granularity: lines and sectors
 
-Suppose:
+Caches never move single floats. A cache line is **128 B**, made of four **32 B sectors**, and traffic between L2 and DRAM is counted in sectors.
+
+So the real question behind "is my access coalesced?" is:
+
+```text
+Of the 32 B I dragged in, how many bytes did I actually use?
+```
+
+A warp of 32 lanes reading consecutive `float`s touches 128 B = 4 sectors, all fully used. The same warp reading with stride 32 touches 32 separate lines — 32× the traffic for the same useful bytes.
+
+---
+
+## 3. What "using L1" actually means
+
+Take a pure streaming kernel:
 
 ```cpp
 for (int i = 0; i < N; i++)
     y[i] = x[i] * 2;
 ```
 
-Every element of `x` is loaded once.
-
-There's basically no reuse:
+Every element of `x` is loaded once and used once:
 
 ```text
 x[0] → load → use once
 x[1] → load → use once
 x[2] → load → use once
-...
 ```
 
-L1 can't magically help much.
-
-You are fundamentally doing:
+There is no reuse for a cache to capture, so every element pays the full path:
 
 ```text
 HBM → L2 → L1 → register
 ```
 
-for each element.
-
-This is **memory bandwidth bound**.
+This is a **bandwidth-bound** kernel. Cache tuning cannot help it; only reducing bytes moved can.
 
 ---
 
-# 3. Now introduce reuse
-
-Imagine:
+## 4. Introducing reuse
 
 ```cpp
-for (int i = 0; i < N; i++) {
-    y[i] = x[i] + x[i + 1];
-}
+y[i] = x[i] + x[i + 1];
 ```
 
-Now:
+`x[1]` feeds both `y[0]` and `y[1]`, so the second access can be served without another trip to DRAM:
 
 ```text
-x[1]
+first access:   HBM → L2 → L1 → register
+second access:  L1 → register
 ```
 
-is used by both:
+You never told the GPU to put `x[1]` in L1 — the hardware did it.
 
-```text
-y[0]
-y[1]
-```
-
-So the hardware can potentially do:
-
-```text
-first access:
-
-HBM → L2 → L1 → register
-
-second access:
-
-L1 → register
-```
-
-That second access is an **L1 hit**.
-
-You didn't explicitly tell the GPU:
-
-> "Put x[1] in L1."
-
-The hardware figured it out.
+> [!WARNING] Careful with this example on a GPU
+> On a CPU this is textbook temporal locality. On a GPU, `x[i]` and `x[i+1]` are read by *adjacent lanes of the same warp in the same instruction*, so the "reuse" is mostly absorbed by the **same 128 B line being fetched once**. That's spatial locality inside a single transaction, not a hit on a later instruction. Real temporal reuse means coming back to the same line **later in time** — which is the case tiling creates deliberately.
 
 ---
 
-# 4. L2 becomes especially interesting with multiple SMs
+## 5. L2 and multiple SMs
 
-Suppose:
+If blocks partition the data, there is little to share:
 
 ```text
 SM0 → reads x[0:1024]
@@ -160,28 +155,15 @@ SM1 → reads x[1024:2048]
 SM2 → reads x[2048:3072]
 ```
 
-Those accesses don't necessarily have much reuse between SMs.
-
-But consider:
+But when many SMs read the *same* data — a weight matrix, a lookup table, a broadcast tensor — L1 can't help them, because each SM has its own:
 
 ```text
-SM0 ──┐
-SM1 ──┤
-SM2 ──┼──> same data
-SM3 ──┘
+SM0 → its own L1
+SM1 → its own L1
+SM2 → its own L1
 ```
 
-L1 is generally local to an SM, so:
-
-```text
-SM0 → L1
-SM1 → L1
-SM2 → L1
-```
-
-would be separate caches.
-
-But they can share the **L2 cache**:
+They do, however, share L2:
 
 ```text
              L2
@@ -189,75 +171,44 @@ But they can share the **L2 cache**:
         SM0  SM1  SM2
 ```
 
-So:
+so the cost is paid once:
 
 ```text
-SM0 → HBM → L2
+SM0 → miss → HBM → L2
 SM1 → L2 hit
 SM2 → L2 hit
 ```
 
-This is one reason L2 can be extremely valuable.
+This is where a large L2 earns its area: V100 had 6 MB, A100 40 MB, H100 50 MB, and consumer Ada parts up to 72–96 MB. On the bigger chips, an entire small model's weights or a full activation tile can stay resident across the whole grid.
 
 ---
 
-# 5. The biggest thing to understand: locality
+## 6. Locality, the two kinds
 
-There are two types.
-
-### Spatial locality
-
-You access nearby addresses.
-
-```text
-x[0]
-x[1]
-x[2]
-x[3]
-...
-```
-
-This is excellent for GPUs.
-
-A memory transaction fetches a cache line containing multiple nearby bytes.
-
-So if a warp does:
+### Spatial locality — nearby addresses
 
 ```text
 lane 0 → x[0]
 lane 1 → x[1]
-lane 2 → x[2]
 ...
 lane 31 → x[31]
 ```
 
-you've got excellent spatial locality.
+Excellent: one instruction, four sectors, everything used. On GPUs this is the same property as **coalescing**.
 
----
-
-### Temporal locality
-
-You reuse the same data.
+### Temporal locality — same address, again, soon
 
 ```text
-x[0]
-x[1]
-x[2]
-
-... computation ...
-
-x[0]
-x[1]
-x[2]
+x[0], x[1], x[2]
+   ... computation ...
+x[0], x[1], x[2]
 ```
 
-Now caching can help significantly.
+Caching helps here *only if the reuse distance is short enough* that the line survives eviction.
 
 ---
 
-# 6. This is where your Triton knowledge becomes useful
-
-Consider:
+## 7. Why vector add can't be cache-tuned
 
 ```python
 offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -268,262 +219,164 @@ y = tl.load(y_ptr + offs)
 tl.store(out_ptr + offs, x + y)
 ```
 
-Your current vector-add kernel has:
+The traffic profile is:
 
 ```text
-x → read once
-y → read once
-out → write once
+x   → read once
+y   → read once
+out → written once
 ```
 
-There is almost **zero temporal reuse**.
-
-So trying to "optimize L1" here is mostly pointless.
-
-Your main concern is:
-
-```text
-Are my global memory accesses coalesced?
-```
-
-And they are.
-
-This is why vector addition is a great example of a **bandwidth-bound kernel**.
+**Zero temporal reuse.** Chasing L1 hit rate here is wasted effort; the only question worth asking is whether the accesses are coalesced — and they are. Arithmetic intensity is ~1 flop per 12 bytes, so the kernel is pinned to HBM bandwidth by construction. That's what makes it the canonical bandwidth-bound example.
 
 ---
 
-# 7. Where caches become extremely important
-
-Consider matrix multiplication.
-
-Naive:
+## 8. Where caches start to matter: GEMM
 
 ```text
-C[i,j] = Σ A[i,k] * B[k,j]
+C[i,j] = Σ_k A[i,k] * B[k,j]
 ```
 
-Suppose many threads need the same:
+Every element of `A[i,k]` is needed by every thread computing row `i`; every `B[k,j]` by every thread in column `j`. That's O(N) reuse per element — enormous. Two ways to capture it:
+
+**Let the cache handle it**
 
 ```text
-A[i,k]
+HBM → L2 → L1 → register
 ```
 
-or:
+**Stage it explicitly**
 
 ```text
-B[k,j]
+HBM → L2 → shared memory → register
 ```
 
-Now you have massive reuse.
-
-You have two choices:
-
-### Let cache handle it
-
-```text
-HBM
- ↓
-L2
- ↓
-L1
- ↓
-register
-```
-
-### Explicitly stage it
-
-```text
-HBM
- ↓
-L2
- ↓
-shared memory
- ↓
-register
-```
-
-The second approach is what traditional CUDA GEMM kernels do heavily.
+Real GEMM kernels do the second, because reuse this valuable is too important to leave to an eviction policy.
 
 ---
 
-# 8. Why not just rely on L1/L2?
+## 9. Why not just rely on L1/L2?
 
-Because caches are **not deterministic storage that you control**.
-
-Suppose L1 has limited capacity.
-
-You load:
+Because a cache is **not storage you control**. With limited capacity, loading
 
 ```text
-A
-B
-C
-D
-E
-F
-G
-H
+A B C D E F G H
 ```
 
-and the cache gets filled.
+may evict the `A` you were about to reuse. Shared memory instead lets you say:
 
-Your previously useful `A` might get evicted.
-
-Shared memory gives you:
-
-> "I want this exact tile to stay here until I'm done."
-
-That's much more powerful.
-
-So:
+> "This exact tile stays here until I'm done with it."
 
 ```text
-Cache:
-    hardware-managed
-
-Shared:
-    programmer/compiler-managed
+Cache:   hardware-managed, best-effort, capacity-and-conflict evictable
+Shared:  programmer-managed, guaranteed resident for the block's lifetime
 ```
 
-This distinction is huge for performance engineering.
+That guarantee is the whole point. It converts a *probabilistic* hit rate into a *deterministic* one — which is what lets you actually reason about a kernel's memory traffic.
 
 ---
 
-# 9. How you actually optimize cache behavior
+## 10. The knobs that do exist
 
-There are roughly four knobs.
+Cache behavior is mostly implicit, but not entirely.
 
-### ① Increase spatial locality
+### ① Spatial locality / coalescing
 
-Bad:
-
-```text
-x[0]
-x[1024]
-x[2048]
-x[3072]
-```
-
-Good:
+Bad → good:
 
 ```text
-x[0]
-x[1]
-x[2]
-x[3]
+x[0], x[1024], x[2048], x[3072]     ⟶     x[0], x[1], x[2], x[3]
 ```
 
-For GPU kernels, this also connects directly to **coalescing**.
+Fix layout (AoS → SoA), transpose on the way in, or pad to kill conflicts.
+
+### ② Temporal reuse
+
+```text
+load A → use once → discard        ⟶     load A → use A four times → discard
+```
+
+More value extracted per memory transaction. This is arithmetic intensity going up.
+
+### ③ Smaller working set
+
+If the hot set fits in L2 (a few MB), it stays hot. If you stream 10 GB with no reuse, no cache saves you — reduce bytes instead (fp16/bf16/fp8, fusion, recompute).
+
+### ④ Reuse close together in time
+
+```text
+SM0 touches A
+   ... 10M cycles ...
+SM0 touches A again        ← conceptually reuse, practically a miss
+```
+
+versus
+
+```text
+load A → use, use, use     ← survives in cache
+```
+
+Restructuring so reuse happens *nearby in time* is exactly what **tiling** does — and why launch order / swizzling of block IDs measurably changes L2 hit rate in GEMM.
+
+### ⑤ L2 persistence window (CC 8.0+)
+
+You *can* tell L2 to favor a region — useful for data re-read by every block:
+
+```cpp
+cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, size);
+
+cudaStreamAttrValue attr;
+attr.accessPolicyWindow.base_ptr  = ptr;
+attr.accessPolicyWindow.num_bytes = bytes;   // ≤ cudaDeviceProp::accessPolicyMaxWindowSize
+attr.accessPolicyWindow.hitRatio  = 0.6f;
+attr.accessPolicyWindow.hitProp   = cudaAccessPropertyPersisting;
+attr.accessPolicyWindow.missProp  = cudaAccessPropertyStreaming;
+cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr);
+```
+
+Reset it with `cudaCtxResetPersistingL2Cache()` when done, or you'll penalize the next kernel.
+
+### ⑥ Per-instruction cache hints
+
+| PTX | Meaning | Use for |
+|---|---|---|
+| `ld.global.ca` | cache at all levels (default) | normal reuse |
+| `ld.global.cg` | cache in L2, bypass L1 | data other SMs also read |
+| `ld.global.cs` | streaming, mark evict-first | one-shot reads |
+| `ld.global.lu` | last use, don't retain | final read of a value |
+| `ld.global.nc` / `__ldg` | read-only path | data not written by the kernel |
+
+In Triton these are exposed directly:
+
+```python
+x = tl.load(x_ptr + offs, cache_modifier=".cg", eviction_policy="evict_first")
+```
+
+Use `evict_last` for the tile you keep coming back to, `evict_first` for the one you stream past once.
 
 ---
 
-### ② Increase temporal reuse
-
-Bad:
+## 11. A diagnostic order for memory-bound kernels
 
 ```text
-load A
-use A
-discard
-```
-
-Better:
-
-```text
-load A
-
-use A
-use A
-use A
-use A
-
-discard
-```
-
-You get more value from every memory transaction.
-
----
-
-### ③ Reduce working-set size
-
-Suppose your kernel touches:
-
-```text
-1 MB
-```
-
-and L2 can easily keep the relevant portion hot.
-
-Great.
-
-If you're streaming through:
-
-```text
-10 GB
-```
-
-with no reuse, cache doesn't save you.
-
----
-
-### ④ Structure work so reuse happens close together
-
-This is subtle and extremely important.
-
-Suppose:
-
-```text
-SM0 accesses A
-...
-10 million cycles later
-...
-SM0 accesses A again
-```
-
-Even if there is temporal reuse conceptually, the data might have been evicted.
-
-But:
-
-```text
-load A
-use A
-use A
-use A
-```
-
-is much more cache-friendly.
-
-This is why **tiling** works.
-
----
-
-# 10. A really useful hierarchy for performance work
-
-When you see a memory-bound kernel, ask these questions in order:
-
-```text
-1. Are accesses coalesced?
+1. Are accesses coalesced?              (bytes requested vs bytes fetched)
         ↓
 2. Is there spatial locality?
         ↓
-3. Is there temporal reuse?
+3. Is there temporal reuse?             ← "what data, by whom, when?"
         ↓
-4. Can reuse happen within registers?
+4. Can that reuse live in registers?
         ↓
-5. Can reuse happen in shared memory?
+5. Can it live in shared memory?
         ↓
-6. Is L1 helping?
+6. Is L1 capturing it?
         ↓
-7. Is L2 helping?
+7. Is L2 capturing it?
         ↓
-8. Am I ultimately limited by HBM bandwidth?
+8. Am I simply at HBM bandwidth?        ← if yes, stop tuning, reduce bytes
 ```
 
-You generally shouldn't start with:
-
-> "How do I maximize L1 utilization?"
-
-Start with:
+Never open with *"how do I maximize L1 utilization?"* Open with:
 
 > **"What data is reused, by whom, and when?"**
 
@@ -531,83 +384,42 @@ Then decide which level of the hierarchy should capture that reuse.
 
 ---
 
-# 11. One very important GPU-specific concept
+## 12. Hit rate is a diagnostic, not a target
 
-You will often see metrics like:
-
-```text
-L1/TEX hit rate
-L2 hit rate
-dram throughput
-```
-
-Don't blindly optimize for:
+Profilers report things like:
 
 ```text
-L1 hit rate = 100%
+l1tex__t_sector_hit_rate.pct
+lts__t_sector_hit_rate.pct
+dram__throughput.avg.pct_of_peak_sustained_elapsed
 ```
 
-That's not necessarily good.
-
-Example:
+A 100% L1 hit rate is not automatically good:
 
 ```text
-Kernel A:
-L1 hit rate = 90%
-HBM bandwidth = 200 GB/s
-
-Kernel B:
-L1 hit rate = 40%
-HBM bandwidth = 800 GB/s
+Kernel A:  L1 hit rate = 90%,  DRAM throughput = 200 GB/s
+Kernel B:  L1 hit rate = 40%,  DRAM throughput = 800 GB/s
 ```
 
-Kernel B might be dramatically faster.
+Kernel B may be dramatically faster — it's saturating the machine, while A may be latency-bound with too little work in flight. High hit rate can even mean you're re-reading data you should have kept in registers.
 
-**Cache hit rate is a diagnostic, not an optimization target.**
-
-What you ultimately care about is:
-
-```text
-execution time
-throughput
-latency
-```
+**What you actually care about is execution time, achieved throughput, and where the roofline says you sit.**
 
 ---
 
-# 12. And this connects directly to Nsight Compute
+## 13. Seeing it in Nsight Compute
 
-Since you're learning NCU, start looking at:
+Start in the **Memory Workload Analysis** section and follow the flow diagram: Global Load/Store → L1/TEX → L2 → DRAM. The numbers on each arrow are the request/sector counts, so you can see exactly where traffic is amplified.
 
-```text
-Memory Workload Analysis
-```
-
-and metrics around:
+A good calibration experiment — three kernels over the same array:
 
 ```text
-L1/TEX
-L2
-DRAM
-Global Load/Store
+Kernel A: read the array once
+Kernel B: read it twice
+Kernel C: read it many times
 ```
 
-A particularly useful experiment is to write three kernels:
-
-```text
-Kernel A:
-    read array once
-
-Kernel B:
-    read same array twice
-
-Kernel C:
-    read same array many times
-```
-
-Then profile them.
-
-You'll start seeing the transition:
+Profile all three and watch the traffic migrate up the hierarchy:
 
 ```text
              A             B             C
@@ -618,42 +430,20 @@ L1        █             █████         ███████
 compute   █             ██            ███████
 ```
 
-The exact behavior depends on working-set size and access pattern, but you'll develop the intuition you're currently missing.
+Exact behavior depends on working-set size versus L2 capacity and on access pattern — which is precisely the intuition the experiment is meant to build.
 
 ---
 
-## The mental model I'd use
+## The mental model
 
-Don't think:
-
-> **"How do I utilize L1/L2?"**
-
-Think:
-
-> **"Where does reuse occur in my algorithm?"**
-
-Then:
+Don't ask *"how do I utilize L1/L2?"* Ask *"where does reuse occur in my algorithm?"* — then map it:
 
 ```text
-same thread, immediate reuse
-        ↓
-registers
-
-different threads, same block
-        ↓
-shared memory
-
-nearby/recent accesses on same SM
-        ↓
-L1 may capture them
-
-reuse across SMs
-        ↓
-L2 may capture them
-
-no reuse / streaming
-        ↓
-HBM bandwidth
+same thread, immediate reuse            →  registers
+different threads, same block           →  shared memory
+nearby/recent accesses on the same SM   →  L1 may capture it
+reuse across SMs                        →  L2 may capture it
+no reuse / pure streaming               →  HBM bandwidth, and that's the ceiling
 ```
 
-That's the mental model that will serve you much better when you start optimizing Triton/CUDA kernels seriously.
+Registers and shared memory are decisions. L1 and L2 are consequences.

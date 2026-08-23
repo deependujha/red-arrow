@@ -39,6 +39,7 @@ toc: false
 - Modular AI
 - PoolSide AI
 - Mercor AI
+- Prime Intellect
 
 ---
 

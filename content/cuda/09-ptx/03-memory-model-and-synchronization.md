@@ -41,8 +41,12 @@ isspacep.shared      %p1, %rd1;     // runtime "which window is this in?"
 getctarank.u32       %r4, %rd1;     // which CTA of the cluster owns this address
 ```
 
+> `mapa`: map address, introduced in `PTX ISA 7.8` & requires `SM_90 or higher`. It takes a shared-memory address in one CTA and returns the corresponding address in another CTA of the same cluster. The `isspacep` instruction is used to determine which memory space a given address belongs to at runtime.
+
 > [!IMPORTANT]
 > **Shared-memory addresses are 32-bit.** `st.shared.f32 [%r9], %f1;` uses a `.b32` register because the shared window is small. Global addresses are 64-bit `%rd`. Mixing them up is the single most common inline-PTX bug — see note 05.
+
+> `[]` is used for memory references, not registers. `%rd1` is a register; `[%rd1]` is the memory at that address.
 
 ---
 
