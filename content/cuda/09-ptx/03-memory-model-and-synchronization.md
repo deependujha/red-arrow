@@ -69,12 +69,142 @@ ld{.weak|.volatile|.relaxed.scope|.acquire.scope}{.ss}{.cop}
 | **Type** | `.b8…​.b128 .u8…​.u64 .s8…​.s64 .f32 .f64` | always last |
 | **Non-coherent** | `ld.global.nc.*` (a separate instruction form) | read-only data cache; requires the data isn't written this kernel |
 
+---
+### Cache Eviction Policy
+
+```text
+        Cache is full
+             │
+             ▼
+     ┌─────────────────┐
+     │ A  B  C  D  E  F │
+     └─────────────────┘
+             │
+       need to evict
+             │
+             ▼
+     eviction priority
+        ↓         ↓
+      keep      evict
+      more      sooner
+```
+
+PTX provides eviction-priority hints:
+
+* **`evict_last`** — highest priority; try to keep the line in cache.
+* **`evict_normal`** — normal/default eviction priority.
+* **`evict_first`** — lowest priority; good candidate for eviction.
+
+Example:
+
+```ptx
+ld.global.L1::evict_first.f32 %f1, [%rd1];
+```
+
+**Important:** these are **hints, not guarantees**. The hardware still controls the actual cache replacement.
+
+> **Mental model:** `evict_first` = *"I'll probably not need this again; throw it out before useful data."*
+
+---
+
+### Cache Operator — Load
+
+Cache operators tell the GPU **how a load should interact with the cache hierarchy**.
+
+```ptx
+ld.global.ca.f32 %f1, [%rd1];
+```
+
+Common options:
+
+* **`.ca` — Cache at all levels**
+  Cache the load in the normal cache hierarchy, including L1 where applicable.
+
+* **`.cg` — Cache globally**
+  Bypass L1 and cache the load at L2.
+
+* **`.cs` — Streaming**
+  Data is expected to have little reuse; gives it a lower caching priority.
+
+* **`.lu` — Last use**
+  Hint that this is the last time the data will be used.
+
+* **`.cv` — Cache volatile**
+  Treat the load as volatile; commonly used when the memory may be modified by another agent and a fresh value is required.
+
+> **Mental model:** `.ca/.cg/.cs/.lu` tell the cache **how you expect to use the data you're loading**.
+
+---
+
+### Cache Operator — Store
+
+For stores, cache operators describe **how the written data should interact with the cache hierarchy**.
+
+```ptx
+st.global.wb.f32 [%rd1], %f1;
+```
+
+Common options:
+
+* **`.wb` — Write-back**
+  Write through the cache hierarchy and allow the cache to retain the data. We write to L1 and L2, and the cache will eventually write it back to memory in the background.
+
+* **`.cg` — Cache globally**
+  Cache the store at L2 rather than L1.
+
+* **`.cs` — Streaming**
+  Store is expected to have little reuse; lower caching priority.
+
+* **`.wt` — Write-through**
+  Write the data through the cache to memory rather than relying on a dirty cache line. Here, the data is written to L1 and L2, and also immediately to memory, instead of waiting for the cache to write it back later.
+
+> **Mental model:** load operators answer **"how should I fetch this?"**; store operators answer **"how should I write this?"**
+
+---
+
+### Cache Hint
+
+Cache hints provide **additional information about the expected cache behavior of a memory access**.
+
+Example:
+
+```ptx
+ld.global.L2::128B.f32 %f1, [%rd1];
+```
+
+Common hints include:
+
+* **`.L2::64B`** — request/hint that 64 bytes of the relevant data should be brought into L2.
+* **`.L2::128B`** — request/hint for 128 bytes.
+* **`.L2::256B`** — request/hint for 256 bytes.
+* **`.L2::evict_first` / `.L2::evict_last`** — eviction-priority hints.
+
+The important distinction:
+
+```text
+Cache operator
+    → "How should this access interact with caching?"
+
+Cache hint
+    → "What additional information can I give the cache?"
+
+Eviction policy
+    → "How valuable should this cache line be if space is needed?"
+```
+
+**All of these are hints/policies, not a guarantee that the hardware will behave exactly as requested.**
+
+---
+
 ```ptx
 ld.global.nc.L1::evict_last.v4.f32  {%f1,%f2,%f3,%f4}, [%rd7];
 st.global.cs.v4.f32                 [%rd8], {%f5,%f6,%f7,%f8};
 createpolicy.fractional.L2::evict_last.b64 %policy, 0.25;
 ld.global.L2::cache_hint.f32        %f9, [%rd9], %policy;
 ```
+
+> `[]` means "memory at this address".
+> `{}` means "vector of registers".
 
 > [!TIP]
 > Cache qualifiers are a **hint layer**: they can change performance drastically and can never change correctness. If you need ordering or visibility guarantees, that's `.relaxed`/`.acquire`/`.release` + scopes — a different, orthogonal set of qualifiers.
@@ -85,7 +215,7 @@ ld.global.L2::cache_hint.f32        %f9, [%rd9], %policy;
 
 PTX has a real, formally specified weak memory model. Three orthogonal axes:
 
-### Axis 1 — the operation's strength
+### Axis 1 — the operation's strength (`Memory-ordering qualifiers`)
 
 | Qualifier | Meaning |
 |---|---|
@@ -98,14 +228,257 @@ PTX has a real, formally specified weak memory model. Three orthogonal axes:
 | `.sc` | sequentially consistent (on `fence` only) |
 | `.mmio` | memory-mapped IO semantics; `.sys` scope only |
 
+
+> These qualifiers control **how memory operations are ordered and observed**, especially when multiple threads/CTAs/GPUs interact through memory. They are not all doing the same thing: `.volatile` is about preserving the memory access, `.relaxed`/`.acquire`/`.release` are about **atomicity and ordering**, and `.sc` provides stronger global ordering.
+
+#### `.weak` — default
+
+No additional synchronization or ordering is requested.
+
+```text
+load A
+load B
+store C
+```
+
+The GPU/compiler can reorder independent operations when allowed by the memory model.
+
+**Think:** *"Just do the operation; don't impose synchronization."*
+
+---
+
+#### `.volatile` — don't treat the access as an ordinary optimizable access
+
+A volatile memory access must remain an actual memory operation; the compiler cannot simply eliminate or merge it as an ordinary access.
+
+```cpp
+volatile int *flag = ...;
+
+int a = *flag;
+do_some_work();
+int b = *flag;      // must remain a separate observable load
+```
+
+Without `volatile`, the compiler may potentially reason that nothing changed `*flag` and reuse the first value.
+
+**Important:** `volatile` does **not** mean:
+
+* bypass L1/L2
+* read directly from HBM
+* atomic
+* synchronized with another thread
+
+**Think:** *"This memory access is externally observable; actually perform it."*
+
+---
+
+#### `.relaxed` — atomic, but don't order other memory operations
+
+Suppose we have a counter:
+
+```cpp
+atomic_add(counter, 1, relaxed);
+```
+
+We need the increment itself to be atomic:
+
+```text
+Thread 0: counter += 1
+Thread 1: counter += 1
+
+        ↓
+
+No lost updates
+```
+
+But we don't need the counter operation to establish ordering with unrelated data.
+
+**Think:** *"Make this atomic, but don't use it as a synchronization point."*
+
+---
+
+#### `.acquire` — nothing after it moves before it
+
+Commonly used when **consuming/picking up data another thread has published**.
+
+```text
+Producer                         Consumer
+
+data = 42
+   │
+   ▼
+release(flag = 1)
+                                  │
+                                  ▼
+                           acquire(flag)
+                                  │
+                                  ▼
+                              read data
+```
+
+The acquire prevents later operations from being reordered before the acquire.
+
+**Think:** *"Once I acquire this, my subsequent work happens after it."*
+
+---
+
+#### `.release` — nothing before it moves after it
+
+Commonly used when **publishing data for another thread**.
+
+```text
+data = 42
+   │
+   │ must happen first
+   ▼
+release(flag = 1)
+```
+
+The release ensures earlier memory operations are ordered before the release operation.
+
+**Think:** *"Finish my previous work before publishing this."*
+
+---
+
+#### `.acq_rel` — both
+
+An operation with `.acq_rel` has both acquire and release semantics.
+
+```text
+        earlier operations
+               │
+               ▼
+          [ operation ]
+               │
+               ▼
+         later operations
+```
+
+So it acts as both:
+
+```text
+release → protects things BEFORE
+acquire → protects things AFTER
+```
+
+**Think:** *"Ordering in both directions."*
+
+---
+
+#### `.sc` — sequentially consistent
+
+This provides a stronger ordering model where applicable: participating operations behave as though they fit into a **single consistent order**.
+
+For example, if multiple threads perform sequentially consistent atomic operations:
+
+```text
+Thread 0        Thread 1        Thread 2
+
+atomic A        atomic B        atomic C
+      \             |             /
+       \            |            /
+        └──── one consistent order ────┘
+```
+
+This is stronger than merely saying individual operations are atomic.
+
+**Think:** *"Give me the strongest, globally consistent ordering model."*
+
+---
+
+#### `.mmio` — memory-mapped I/O
+
+This is for memory accesses that communicate with **hardware devices through memory addresses**, rather than ordinary GPU memory.
+
+```text
+GPU
+ │
+ │ memory access
+ ▼
+MMIO address
+ │
+ ▼
+hardware device / register
+```
+
+You generally don't need this for normal CUDA kernel memory operations.
+
+---
+
+#### The mental model
+
+When you see:
+
+```ptx
+ld.global.relaxed.sys
+```
+
+break it into separate questions:
+
+```text
+.relaxed
+   ↓
+What ordering does this operation provide?
+
+.sys
+   ↓
+Which threads/devices does that ordering apply to?
+```
+
+And for something like:
+
+```ptx
+ld.global.volatile
+```
+
+think:
+
+```text
+.volatile
+   ↓
+Don't optimize this memory access away/merge it
+```
+
+rather than:
+
+```text
+.volatile
+   ↓
+Go directly to HBM
+```
+
+#### The key distinction
+
+```text
+volatile
+    → preserve the memory access
+
+relaxed
+    → atomic, but no ordering
+
+acquire
+    → order things AFTER
+
+release
+    → order things BEFORE
+
+acq_rel
+    → order BEFORE + AFTER
+
+sc
+    → strong sequential consistency
+```
+
+---
+
 ### Axis 2 — scope: *who* is synchronized with
 
-| Scope | Set of threads |
-|---|---|
-| `.cta` | this thread block |
-| `.cluster` | this CTA cluster (Hopper+) |
-| `.gpu` | all threads on this device |
-| `.sys` | all threads on all devices + the host |
+| Scope | Set of threads | first coherent meeting point | typical cost |
+|---|---|---|---|
+| `.cta` | this thread block | SM (shared memory + L1) | cheapest |
+| `.cluster` | this CTA cluster (Hopper+) | GPC / DSMEM fabric | moderate |
+| `.gpu` | all threads on this device | L2 | expensive |
+| `.sys` | all threads on all devices + the host | system (NVLink/PCIe) | most expensive |
 
 Cost rises monotonically. `atom.global.add.u32` with default `.gpu` scope is much more expensive than `atom.global.cta.add.u32` when a block-local counter would do.
 
