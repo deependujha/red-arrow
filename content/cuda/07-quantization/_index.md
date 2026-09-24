@@ -50,3 +50,15 @@ $$\text{Byte} = (A \text{ \& } 0\text{xF}) \mid (B \ll 4)$$
 ---
 
 ## Quantization Techniques
+
+
+- pytorch dispatch method and subclassing torch.tensor
+https://github.com/albanD/subclass_zoo/tree/main
+
+- understand ptq, gptq, awq, qat, 
+
+https://github.com/jeffhammond/pytorch-china-2026-nccl-tutorial/tree/main
+
+https://gemini.google.com/app/f62deea7cbae2589
+
+https://github.com/meta-pytorch/MSLK
