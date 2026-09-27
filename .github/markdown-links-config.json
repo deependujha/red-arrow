@@ -10,7 +10,7 @@
       "pattern": "^/.*"
     },
     {
-      "pattern": "^https://github.com/Lightning-AI/litData/pull/"
+      "pattern": "^https://gemini.google.com/*"
     },
     {
       "pattern": "^https://codecov.io/gh/Lightning-AI/litData/graph/badge.svg"
