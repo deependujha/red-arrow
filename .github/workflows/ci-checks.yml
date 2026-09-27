@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   check-md-links:
-    uses: deependujha/utilities/tree/patch-1/.github/workflows/check-md-links.yml@38101c45bcf944b3928a0be792505f508b3d3ec0
+    uses: deependujha/utilities/.github/workflows/check-md-links.yml@patch-1
     with:
       config-file: ".github/markdown-links-config.json"
       base-branch: "main"
