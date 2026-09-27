@@ -1,0 +1,19 @@
+name: General checks
+
+on:
+  push:
+    branches: [main, "release/*"]
+  pull_request:
+    branches: [main, "release/*"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check-md-links:
+    uses: deependujha/utilities/tree/patch-1/.github/workflows/check-md-links.yml
+    with:
+      config-file: ".github/markdown-links-config.json"
+      base-branch: "main"
+      force-check-all: "yes"
