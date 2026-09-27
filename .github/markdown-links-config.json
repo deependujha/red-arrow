@@ -4,6 +4,12 @@
       "pattern": "^#"
     },
     {
+      "pattern": "^\\./.*"
+    },
+    {
+      "pattern": "^/.*"
+    },
+    {
       "pattern": "^https://github.com/Lightning-AI/litData/pull/"
     },
     {
