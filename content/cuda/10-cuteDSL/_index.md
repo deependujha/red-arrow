@@ -17,6 +17,30 @@ uv pip install nvidia-cutlass-dsl
 uv pip install "nvidia-cutlass-dsl[cu13]"
 ```
 
+### Installation
+
+- check `nvcc` version
+
+```bash
+nvcc --version
+```
+
+- if `nvcc` is neither 12.9 nor 13.3, install the appropriate CUDA Toolkit and set up your environment accordingly.
+[check the CUDA 13.3 download archive](https://developer.nvidia.com/cuda-13-3-0-download-archive?target_os=Linux&target_arch=x86_64&Distribution=Ubuntu&target_version=24.04&target_type=deb_network)
+
+> [!tip] "Check your system configuration"
+> - check hardware architecture (`x86_64`, `arm64`, etc.)
+> 
+> ```bash
+> uname -m 
+> ```
+> 
+> - check linux distribution
+> 
+> ```bash
+> cat /etc/os-release
+> ```
+
 ---
 
 ## `kernel` v/s `jit`
@@ -81,3 +105,57 @@ Two rules cover it:
 > - and **a kernel cannot launch another kernel**.
 
 Everything else — `@jit`, `@kernel`, or plain Python calling `@jit` or plain Python — is inlined at compile time and costs nothing at runtime.
+
+## Minimal sum kernel
+
+This deliberately serial example sums `n` elements into a one-element output tensor. It is minimal, not optimized for performance.
+
+```python
+import cutlass
+import cutlass.cute as cute
+import torch
+from cutlass.cute.runtime import from_dlpack
+
+
+@cute.kernel
+def add_kernel(x: cute.Tensor, y: cute.Tensor, z: cute.Tensor, N: cutlass.Int32):
+    tidx, _, _ = cute.arch.thread_idx()
+    bidx, _, _ = cute.arch.block_idx()
+    bdimx, _, _ = cute.arch.block_dim()
+
+    idx = bdimx * bidx + tidx
+    if idx < N:
+        z[idx] = x[idx] + y[idx]
+
+
+@cute.jit
+def add(x: cute.Tensor, y: cute.Tensor, z: cute.Tensor, N: cutlass.Int32):
+    THREADS_PER_BLOCK = 256
+    num_blocks = (N + THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
+    add_kernel(x, y, z, N).launch(
+        grid=[num_blocks, 1, 1],
+        block=[THREADS_PER_BLOCK, 1, 1],
+    )
+
+
+def main():
+    N = 4096
+    x = torch.ones(N, device="cuda")
+    y = torch.ones(N, device="cuda")
+    z = torch.empty_like(x)
+
+    x_c = from_dlpack(x, assumed_align=16)
+    y_c = from_dlpack(y, assumed_align=16)
+    z_c = from_dlpack(z, assumed_align=16)
+
+    add(x_c, y_c, z_c, N)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(z, torch.full_like(z, 2.0))
+    print("ok")
+
+
+if __name__ == "__main__":
+    main()
+```
+
