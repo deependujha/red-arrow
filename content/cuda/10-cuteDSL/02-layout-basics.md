@@ -1,5 +1,5 @@
 ---
-title: CuTe layout & layout Algebra
+title: CuTe layout basics
 type: docs
 math: true
 sidebar:
@@ -110,8 +110,59 @@ Why bother? Because it lets one mode represent *"a tile of data"* and another *"
 | weakly congruent | `a` can be broadcast up to `b` (an int may stand in for a tuple) | `cute.is_weakly_congruent(a, b)` |
 | static / dynamic | known at compile time or runtime | `cute.is_static(x)` |
 
+```python
+import cutlass
+import cutlass.cute as cute
+
+
+@cute.jit
+def demo():
+    L = cute.make_layout(((2,2), 8), stride=((4,2), 1))     # row-major 4x8
+    print(L)                                         # (4,8):(8,1)
+    helpers = ("rank", "depth", "size", "cosize", "is_static")
+    for hlp_method in helpers:
+        mthd = getattr(cute, hlp_method)
+        print(f"{hlp_method}: {mthd(L)}")
+    
+    print("-"*70)
+    for mod in cutlass.range_constexpr(cute.rank(L)):
+        print(f"mode: {mod}; shape: {cute.shape(L, mode=mod)}")
+    
+    print("-"*70)
+    l1 = cute.make_layout((3,4))
+    l2 = cute.make_layout(((2,2),8))
+
+    print(f"{cute.is_congruent(l1,l2)=}")
+    print(f"{cute.is_weakly_congruent(l1,l2)=}")
+
+if __name__ == "__main__":
+    demo()
+
+# ⚡ ~/cute-layouts python main.py 
+# ((2,2),8):((4,2),1)
+# rank: 2
+# depth: 2
+# size: 32
+# cosize: 14
+# is_static: True
+# ------------------------------------
+# mode: 0; shape: (2, 2)
+# mode: 1; shape: 8
+# ------------------------------------
+# cute.is_congruent(l1,l2)=False
+# cute.is_weakly_congruent(l1,l2)=True
+```
+
 > [!NOTE]
-> `size` vs `cosize`: `(4,8):(8,1)` has size 32 and cosize 32. `(4,8):(16,1)` has size 32 but cosize 56 (rows have a gap), so allocate `cosize` elements, not `size`. Same warning as in [shared memory](../03-shared-memory).
+> `size` vs `cosize`: `(4,8):(8,1)` has `size = 32` and `cosize = 32`. `(4,8):(16,1)` still has `size = 32`, but `cosize = 56` because the rows are separated by a gap. So allocate `cosize` elements, not `size`.
+>
+> To compute it, find the last valid coordinate: `(3,7)` for shape `(4,8)`, then take the dot product with the stride to get the maximum offset. That gives the allocation size: `3*stride[0] + 7*stride[1] + 1` (since the base address is 0).
+
+#### congruence
+
+- **`is_congruent(a, b)`**: Requires an exact structural match. Every tuple level must have the same rank, and scalars must match with scalars.
+
+- **`is_weakly_congruent(a, b)`**: Allows a to be flatter than b. A scalar element in a is allowed to match against a nested tuple in b.
 
 ### 1.5 Structure-only helpers (don't change the mapping)
 
@@ -126,6 +177,69 @@ Why bother? Because it lets one mode represent *"a tile of data"* and another *"
 | `filter_zeros(L)` | drop stride-0 modes | |
 
 `coalesce` is the "simplify" button: same coordinate → index mapping (on the 1D view), minimal shape.
+
+```python
+import cutlass
+import cutlass.cute as cute
+import torch
+
+
+@cute.jit
+def demo(x: torch.Tensor):
+    l1 = cute.make_layout((3,4,5,(6,7),8,9))
+    print(f"{cute.group_modes(l1, 2, 5)=}")
+    print(f"{cute.flatten(l1)=}")
+
+    print("-"*50)
+    # Layout slicing
+    l2 = cute.make_layout((24,44))
+
+    # Select 1st index of first mode and keep all elements in second mode
+    sub_layout = cute.slice_(l2, (1, None))
+    print(f"{sub_layout=}; {sub_layout(3)=}")
+
+    sub_tensor = cute.slice_(x, (2, None))
+
+    for i in cutlass.range_constexpr(5):
+        cute.printf("i: {} => val: {}", i, sub_tensor[i])
+
+    print("-"*50)
+
+    l3 = cute.make_layout((4,4),stride=(24, 26))
+    sub_l3 = cute.dice(l3, (1, None))
+    print(f"{sub_l3=}")
+    print(f"{sub_l3(3)=}")
+    print("-"*50)
+
+    print(f"{l2=}; {l3=}")
+    print(f"{cute.shape_div(l2.shape, l3.shape)=}")
+
+
+
+
+if __name__ == "__main__":
+    x = torch.arange(20).reshape(4,5)
+    demo(x)
+
+# ⚡ ~/cute-layouts python 04-step_one.py
+# cute.group_modes(l1, 2, 5)=(3,4,(5,(6,7),8),9):(1,3,(12,(60,360),2520),20160)
+# cute.flatten(l1)=(3,4,5,6,7,8,9):(1,3,12,60,360,2520,20160)
+# --------------------------------------------------
+# sub_layout=(44):(24); sub_layout(3)=72
+# --------------------------------------------------
+# sub_l3=(4):(24)
+# sub_l3(3)=72
+# --------------------------------------------------
+# l2=(24,44):(1,24); l3=(4,4):(24,26)
+# cute.shape_div(l2.shape, l3.shape)=(6, 11)
+# --------------------------------------------------
+# (below is the output of slice, since it used cute.printf, it's printed at the runtime, not compile time)
+# i: 0 => val: 10
+# i: 1 => val: 11
+# i: 2 => val: 12
+# i: 3 => val: 13
+# i: 4 => val: 14
+```
 
 ---
 

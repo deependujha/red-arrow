@@ -4,7 +4,7 @@ type: docs
 math: true
 sidebar:
   open: false
-weight: 1003
+weight: 1004
 ---
 
 ## 0. Mental model (read this first)
