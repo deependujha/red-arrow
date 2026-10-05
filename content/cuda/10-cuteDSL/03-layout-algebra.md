@@ -184,83 +184,195 @@ This is especially useful for understanding how CuTe derives **tile coordinates,
 
 ---
 
-## 3. Divide: re-name A as *(inside tile, which tile)*
+## Division / Tiling
 
-```
-logical_divide(A, T) = composition(A, make_layout(T, complement(T, size(A))))
-                                                  ^         ^
-                                    inside one tile    which tile
-```
+Division is how CuTe **re-indexes a layout into tiles**.
 
-Composition intuition: we build a lens **B = (T, complement(T))** and view A through it. T says which coordinates form tile #0, and complement(T) says where all the other tiles start. The result has two modes:
-
-- **mode 0: position inside a tile** (shape of T)
-- **mode 1: which tile** (shape of the complement)
-
-Nothing moves in memory. It's the same elements, re-indexed as `(elem, tile)`.
-
-```
-logical_divide(24:1, 4:1) = (4,6):(1,4)
-      0  4  8 12 16 20        column t = tile t: plain chunks of 4
-      1  5  9 13 17 21
-      ...
-
-logical_divide(24:1, 4:2) = (4,(2,3)):(2,(1,8))
-      0  1  8  9 16 17        tile = 4 elements, 2 apart
-      2  3 10 11 18 19        tiles start at +1, then +8 (complement of 4:2)
-      4  5 12 13 20 21
-      6  7 14 15 22 23
+```python
+Z = cute.zipped_divide(A, T)
 ```
 
-Read `(4,(2,3)):(2,(1,8))` out loud: "*4 per tile, step 2 · 6 tiles: next tile +1, and after two of those, +8*".
+Think:
 
-> [!IMPORTANT]
-> **The tiler acts on A's *coordinates*, not on memory.** That's why it's called *logical* divide. `gpu_partition.py` partitions a row-major and a column-major tensor with the same tiler and gets **identical owners** for every `(i,j)`; only the strides inside the result differ. Think "cut the index space"; memory just comes along.
+> **A = the whole space**  
+> **T = what one tile looks like**  
+> **divide = expose `(inside_tile, which_tile)` coordinates**
 
-### 2D: tuple tilers + the four flavours
+Nothing is moved in memory. The same elements are simply given a new coordinate system.
 
-A tuple tiler divides each mode separately. The flavours are **the same function**; they differ only in how the resulting modes are grouped:
-
-```
-A = (8,8):(8,1), tiler (4,4)
-
-logical_divide  ((4,2),(4,2)):((8,32),(1,4))     each dim split in place: (rows: in-tile, which-tile), (cols: ...)
-zipped_divide   ((4,4),(2,2)):((8,1),(32,4))     ((tile modes), (rest modes))   <- the one you'll use
-tiled_divide    ((4,4),2,2):((8,1),32,4)         (tile, rest flattened)
-flat_divide     (4,4,2,2):(8,1,32,4)             everything flat
+```text
+A
+│
+│ divide by T
+▼
+(inside tile, which tile)
 ```
 
-**Reading zipped_divide**: mode 0 `(4,4):(8,1)` = inside a tile you move **exactly like in A** (A's own strides). Mode 1 `(2,2):(32,4)` = jumping tiles: `32 = 4 rows × 8` and `4 = 4 cols × 1`, i.e. *tile extent × A's stride*. You can predict these strides without running anything.
+### The fundamental operation
 
-### The payoff: slicing a zipped divide
-
-`Z = zipped_divide(A, tile)` has shape `((tile), (rest))`. Fixing one of the two modes gives the two most common partition patterns in every kernel:
-
-| slice | gives | used for |
-|---|---|---|
-| `Z[((None,None), t)]` | all of tile `t` | **a CTA grabs its block** |
-| `Z[(e, None)]` | element `e` of *every* tile (strided) | **a thread grabs its share** when "tile" = the thread layout |
-
-```
-Z = zipped_divide((8,8):(8,1), (2,4)) = ((2,4),(4,2)):((8,1),(16,4))
-Z[((None,None), 5)]  = (2,4):(8,1)      + offset 20   -> rows 2-3, cols 4-7
-Z[(3, None)]         = (4,2):(16,4)     + offset 9    -> one element per tile
+```python
+cute.logical_divide(A, T)
 ```
 
-Two things that bite:
-- `Z[(None, t)]` keeps mode 0 as **one nested mode** `((2,4))`, which is rank 1. Spell it `((None,None), t)` if you want a rank-2 tile you can divide again (the kernel in `gpu_partition.py` needs this).
-- Slicing a *layout* returns a sub-layout **plus an offset** (`cute.slice_and_offset`). On a *tensor*, the offset is folded into the pointer, so you never see it.
+is essentially:
 
-`gpu_partition.py` does exactly this on the GPU: `zipped_divide(mA, (8,16))[((None,None),(bx,by))]` per CTA, then inside the tile either:
-- `zipped_divide(tile, (4,8))[(tid, None)]`: "strided": thread `t` gets position `t` of every 4×8 sub-tile, or
-- `zipped_divide(tile, (2,2))[(None, tid)]`: "chunked": thread `t` gets the whole `t`-th 2×2 sub-tile.
+```python
+composition(
+    A,
+    make_layout(T, complement(T, size(A)))
+)
+```
 
-Same divide, other mode fixed.
+So the first mode represents the **tile**, while the complementary part represents the **rest / tile positions**.
 
-> [!NOTE]
-> Sizes that don't divide evenly: `cute.ceil_div(shape, tiler)` = the rest-mode shape, and the last tile hangs off the edge. Mask it with an identity tensor (predication).
+You don't usually need to construct this manually.
 
-🎬 `S04_LogicalDivide1D.mp4`, `S05_ZippedDivide2D.mp4`
+---
+
+### The variants
+
+They all perform the same basic division; they mainly differ in **how the resulting modes are grouped**.
+
+For a 2-D tensor and 2-D tiler:
+
+```text
+logical_divide
+    ((TileM, RestM), (TileN, RestN))
+
+zipped_divide
+    ((TileM, TileN), (RestM, RestN))
+
+tiled_divide
+    ((TileM, TileN), RestM, RestN)
+
+flat_divide
+    (TileM, TileN, RestM, RestN)
+```
+
+Think of them as different **views of the same tiling**:
+
+```text
+logical → preserves the original modes
+zipped  → groups all tile modes + all rest modes
+tiled   → keeps tile together, rest modes separate
+flat    → flattens everything
+```
+
+### The one to remember
+
+**`zipped_divide` is the important practical one.**
+
+It gives the clean mental model:
+
+```text
+((tile), (rest))
+```
+
+For example:
+
+```python
+Z = cute.zipped_divide(A, (128, 128))
+```
+
+means:
+
+```text
+Z[tile_element, tile_coordinate]
+```
+
+So you can naturally:
+
+```text
+select a tile
+        ↓
+select elements within that tile
+        ↓
+partition those elements across threads
+```
+
+This is why it appears so often in real kernels.
+
+---
+
+### `local_tile`
+
+When you don't need the entire divided layout and simply want **one tile**, use:
+
+```python
+tile = cute.local_tile(A, (128, 128), coord)
+```
+
+Conceptually:
+
+```text
+zipped_divide(A, tiler)
+        ↓
+      choose
+    one tile
+        ↓
+   local_tile(...)
+```
+
+This is commonly used for **CTA/block-level tiles**.
+
+---
+
+### Real-kernel mental model
+
+When you see:
+
+```python
+zipped_divide(...)
+```
+
+think:
+
+> **"Expose the tile coordinates."**
+
+When you see:
+
+```python
+local_tile(...)
+```
+
+think:
+
+> **"Give me this particular tile."**
+
+When you see:
+
+```python
+local_partition(...)
+```
+
+think:
+
+> **"Now distribute this tile across threads/warps."**
+
+So a common kernel flow is:
+
+```text
+global tensor
+      │
+      ▼
+  zipped_divide
+      │
+      ▼
+   CTA tiles
+      │
+      ▼
+  local_tile
+      │
+      ▼
+ thread/warp partition
+      │
+      ▼
+ registers / shared memory / MMA
+```
+
+The exact divide variant matters mainly when you need a particular **mode organization** for subsequent layout operations.
+
+> **Don't memorize the four variants as four different algorithms. They're mostly different ways of arranging the same `(tile, rest)` decomposition.**
 
 ---
 
