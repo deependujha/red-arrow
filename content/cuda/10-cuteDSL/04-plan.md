@@ -645,3 +645,5 @@ tCrA/tCrB       → my register fragments for MMA
 ```
 
 **That is the level I'd target now.** Once you reach that, stop studying fundamentals and start learning by reading kernels. That's where your CuTe knowledge will compound much faster.
+
+Later learn about `warp-specializations`, `pipelining` & more advanced concepts & patterns.
