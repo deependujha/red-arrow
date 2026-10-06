@@ -603,7 +603,246 @@ That's enough to recognize what's happening when you encounter product-related c
 
 ---
 
+## Inverses
 
+A layout normally answers:
+
+> **“Given a logical coordinate, where is it in memory?”**
+
+```text
+logical coordinate → layout → memory offset
+```
+
+An inverse reasons in the opposite direction:
+
+```text
+memory offset → inverse → logical coordinate
+```
+
+### Bijection
+
+If a layout is a **bijection** — every coordinate maps to a unique offset and every offset in the target space is covered — the inverse is straightforward:
+
+e.g.: `Layout = (x, y): (y, 1)`
+
+```text
+logical coordinate ↔ memory offset
+```
+
+### `left_inverse`
+
+`left_inverse(L)` gives a layout that **undoes the mapping of `L`**.
+
+Think:
+
+```text
+L:
+coordinate → offset
+
+left_inverse(L):
+offset → coordinate
+```
+
+For offsets that `L` actually produces:
+
+```text
+L(2) = 4
+left_inverse(L)(4) = 2
+```
+
+If `L` has holes, `left_inverse` is still itself a CuTe layout, so its behavior outside the offsets produced by `L` is determined by that layout rather than being a simple dictionary lookup.
+
+### `right_inverse`
+
+`right_inverse(L)` is **not simply `offset → coordinate`**.
+
+It constructs an **inverse layout on the other side of the layout composition**.
+
+The important distinction is:
+
+```text
+left_inverse  → think “undo L”
+right_inverse → think “construct the inverse layout”
+
+- original_layout(right_inverse_layout(x)) = x
+
+```
+
+Both return **layouts**, not ordinary lookup functions.
+
+The left/right terminology comes from **which side of a layout composition the inverse operates on**, rather than simply meaning:
+
+```text
+left  = forward
+right = backward
+```
+
+You generally don't need to derive the algebra by hand at first.
+
+---
+
+### Example
+
+```python
+import cutlass
+import cutlass.cute as cute
+
+
+@cute.jit
+def foo():
+    L = cute.make_layout((2, 2), stride=(1, 4))
+
+    for i in cutlass.range_constexpr(4):
+        print(f"{i=}: {L(i)=}")
+
+    print("-" * 60)
+
+    rl = cute.right_inverse(L)
+    ll = cute.left_inverse(L)
+
+    for offset in cutlass.range_constexpr(10):
+        print(f"{offset=}; {ll(offset)=}; {rl(offset)=}")
+
+
+if __name__ == "__main__":
+    foo()
+```
+
+Output:
+
+```text
+i=0: L(i)=0
+i=1: L(i)=1
+i=2: L(i)=4
+i=3: L(i)=5
+------------------------------------------------------------
+offset=0; ll(offset)=0; rl(offset)=0
+offset=1; ll(offset)=1; rl(offset)=1
+offset=2; ll(offset)=2; rl(offset)=2
+offset=3; ll(offset)=3; rl(offset)=3
+offset=4; ll(offset)=2; rl(offset)=4
+offset=5; ll(offset)=3; rl(offset)=5
+offset=6; ll(offset)=4; rl(offset)=6
+offset=7; ll(offset)=5; rl(offset)=7
+offset=8; ll(offset)=4; rl(offset)=8
+offset=9; ll(offset)=5; rl(offset)=9
+```
+
+The original layout is:
+
+```text
+L = (2, 2):(1, 4)
+```
+
+so:
+
+```text
+coordinate    offset
+
+    0    →      0
+    1    →      1
+    2    →      4
+    3    →      5
+```
+
+Notice the holes:
+
+```text
+memory:
+
+0  1  2  3  4  5
+A  B  .  .  C  D
+```
+
+For the offsets actually produced by `L`:
+
+```text
+L(0) = 0  → left_inverse(0) = 0
+L(1) = 1  → left_inverse(1) = 1
+L(2) = 4  → left_inverse(4) = 2
+L(3) = 5  → left_inverse(5) = 3
+```
+
+So `left_inverse` behaves like the intuitive **“undo the layout”** operation.
+
+The important observation from the experiment is that:
+
+```text
+right_inverse(L)(4) = 4
+right_inverse(L)(5) = 5
+```
+
+Therefore, **do not interpret `right_inverse(L)` as simply `offset → logical coordinate`**. It is an inverse **layout**, whose meaning becomes clear when considering layout composition rather than treating it as a lookup table.
+
+---
+
+### Why care in real kernels?
+
+Inverses become useful when CuTe needs to reason about how layouts map onto each other — particularly for **copy operations, layout compatibility, and vectorization**.
+
+For example, CuTe may need to determine whether two layouts allow consecutive elements to be moved together:
+
+```text
+contiguous:
+
+[A B C D E F G H]
+ ^^^^^^^^
+ consecutive → potentially vectorizable
+```
+
+versus:
+
+```text
+[A . B . C . D]
+```
+
+where the accesses are not contiguous.
+
+This is related to APIs such as:
+
+```python
+cute.max_common_vector(...)
+```
+
+which helps determine the largest common vectorizable access between layouts.
+
+### When you'll encounter it
+
+You probably won't manually call:
+
+```python
+cute.left_inverse(...)
+cute.right_inverse(...)
+```
+
+very often.
+
+You're more likely to encounter inverse-related logic indirectly when working with:
+
+- `copy` / `cute.copy`
+- `CopyAtom`
+- copy layouts
+- vectorized global/shared-memory transfers
+- layout compatibility
+- alignment
+- `max_common_vector`
+
+So the practical mental model is:
+
+```text
+Layout:
+    logical coordinate → memory
+
+left_inverse:
+    memory offset → coordinate
+    “undo the layout”
+
+right_inverse:
+    construct the inverse layout
+    used in layout composition
+```
+
+> **You mainly care about inverses when CuTe needs to reason about the relationship between a layout and its reverse mapping — especially for copies, layout compatibility, and vectorization.**
 
 ---
 
