@@ -376,77 +376,234 @@ The exact divide variant matters mainly when you need a particular **mode organi
 
 ---
 
-## 4. Product: the mirror image of divide
+## Product
 
-Divide takes a **big** thing and names it *(tile, which tile)*. Product takes a **small** thing and *builds* the big one: *(block, which copy)*.
+Think of **product as the mirror image of divide**.
 
-```
-logical_product(A, B) = make_layout(A, composition(complement(A, size(A)*cosize(B)), B))
-                                    ^              ^                                   ^
-                               the block    all the places a copy of A could start     arranged in B's pattern
-```
+> **Divide:** take a big layout → `(inside tile, which tile)`  
+> **Product:** take a small layout → `(inside block, which copy)` → build the bigger layout
 
-Step by step with `A = (2,2):(1,2)` (a 2×2 block) and `B = (3,2):(1,3)` (a 3×2 grid of copies):
+```text
+Divide:
+big space
+   ↓
+(tile, which tile)
 
-1. `complement(A, 4*6=24) = 6:4`: copy #n starts at `4n`. The complement automatically skips over A's own footprint.
-2. `composition(6:4, B) = (3,2):(4,12)`: lay those 6 copies out as B's 3×2 grid.
-3. `P = ((2,2),(3,2)):((1,2),(4,12))`: mode 0 = inside block, mode 1 = which copy.
-
-Why `size(A)*cosize(B)`? B's outputs number the copies `0..cosize(B)-1`, and each copy occupies `size(A)` slots.
-
-### blocked vs raked: same product, regrouped per dimension
-
-`logical_product` gives `(block, copies)`. For a 2D picture, you want *row* and *column* modes instead. Pair the row part of the block with the row part of the copies, and so on. **The order inside each pair is the only difference:**
-
-```
-blocked_product(A,B) = ((2,3),(2,2)):((1,4),(2,12))     row = (inside block, which block)
-     0  2 12 14
-     1  3 13 15          each copy's 4 values (4n..4n+3) sit together as a 2x2 block
-     4  6 16 18
-     5  7 17 19
-     ...
-
-raked_product(A,B)   = ((3,2),(2,2)):((4,1),(12,2))     row = (which block, inside block)
-     0 12  2 14
-     4 16  6 18          elements dealt out like cards:
-     8 20 10 22          neighbours belong to DIFFERENT copies
-     1 13  3 15
-     ...
+Product:
+small block
+   ↓
+(block, copies)
+   ↓
+bigger space
 ```
 
-How to read them: in `(2,3)` the *fast* sub-mode comes first. In blocked, the fast part is "inside block", so a block's elements are adjacent. In raked, the fast part is "which block", so you cycle through copies first.
+### The basic intuition
 
-Intuition for kernels: "copies" are usually **threads**. *Blocked* = each thread's values are contiguous. *Raked* = threads take turns, so adjacent elements belong to adjacent threads (coalesced).
+> [!INFO]Real-world example: apartment building
+>
+> Imagine an apartment building with:
+> - 4 floors
+> - 3 apartments per floor
+> 
+> You could identify an apartment using:
+> - `(floor, apartment)`
+>
+> So:
+> ```text
+> Floor 0:  A0  A1  A2
+> Floor 1:  A0  A1  A2
+> Floor 2:  A0  A1  A2
+> Floor 3:  A0  A1  A2
+> ```
+>
+> There are 4 × 3 = 12 apartments.
 
-`tile_to_shape(atom, shape)` is "blocked_product until it fills `shape`". It's how a small swizzled smem atom grows into a full tile.
+Suppose `A` is a small block:
 
-🎬 `S06_Product.mp4`
+```text
+A = one 2×2 block
+
+0 1
+2 3
+```
+
+and `B` describes **where/how many copies** of that block we want:
+
+```text
+B = 3 × 2 arrangement of copies
+```
+
+Then:
+
+```python
+logical_product(A, B)
+```
+
+means:
+
+> **Take A and replicate it according to B.**
+
+Conceptually:
+
+```text
+A       B
+block × layout-of-copies
+          ↓
+      bigger layout
+```
+
+So remember:
+
+> **A = what each copy looks like**  
+> **B = how the copies are arranged**
+
+This is why `complement` appears underneath the implementation: it gives the available positions where copies of `A` can be placed.
 
 ---
 
-## 5. Inverses: from memory slot back to coordinate
+### Logical product vs the practical variants
 
-`L` answers "*coordinate k → which slot?*". An inverse answers "*slot i → which coordinate?*". For a bijection (a permutation) there's only one answer:
+`logical_product(A, B)` fundamentally produces:
 
-```
-L = (2,4):(4,1)                  memory order: k0 k2 k4 k6 k1 k3 k5 k7
-right_inverse(L) = (4,2):(2,1)   i = a + 4b  ->  k = 2a + b
-```
-
-When L has **holes**, there are two different questions:
-
-```
-L = (2,2):(1,4)                  hits slots {0,1,4,5} of 8
-
-left_inverse(L)  = (4,2):(1,2)   Li(L(k)) == k for every k: undoes L on the slots L touches.
-                                 On slots L never touches (2,3,6,7) its output is junk.
-right_inverse(L) = 2:1           L(Ri(i)) == i, but only for the contiguous run 0,1,2,... L covers.
-                                 Here: slots 0,1 -> size 2.
+```text
+(block, which_copy)
 ```
 
-**`size(right_inverse(L))` = how many consecutive elements, starting at 0, L lays out contiguously = the widest vector you can load.** That's the idea behind `max_common_vector(src, dst)` (roughly: `coalesce(composition(src, right_inverse(dst)))`, then its leading stride-1 run). It decides whether a copy is 128-bit or scalar.
+Just like `logical_divide` produces:
 
-🎬 `S07_Inverses.mp4`
+```text
+(tile, which_tile)
+```
+
+But for multidimensional layouts, `(block, copy)` isn't always the most useful way to look at the result.
+
+The other product variants mainly **regroup those modes**.
+
+### `blocked_product`
+
+Think:
+
+> **Keep each block together.**
+
+```text
+block 0: [A A A A]
+block 1: [A A A A]
+block 2: [A A A A]
+```
+
+The elements belonging to one copy stay together.
+
+Useful when you want a **block/thread's values to be contiguous**.
+
+---
+
+### `raked_product`
+
+Think:
+
+> **Interleave the copies.**
+
+Instead of:
+
+```text
+AAAA BBBB CCCC
+```
+
+you get something conceptually like:
+
+```text
+ABCABCABCABC
+```
+
+The copies take turns.
+
+This is useful when you want **different threads/copies to take interleaved elements**, e.g. a cyclic/raked distribution.
+
+---
+
+### The other variants
+
+Just like divide:
+
+```text
+logical_product
+    → fundamental product
+
+zipped_product
+    → group the original modes together
+      and the copy/tile modes together
+
+tiled_product
+    → keep the original block together,
+      copy modes separate
+
+flat_product
+    → flatten the modes
+```
+
+You don't need to memorize the exact shapes yet.
+
+The important distinction is:
+
+```text
+logical  → what is the fundamental result?
+zipped / tiled / flat
+         → how do I want that result organized?
+```
+
+---
+
+## What to expect in real kernels
+
+You probably won't spend much time manually constructing `logical_product()`.
+
+You'll encounter the product family when **building a larger layout from a smaller layout/atom**.
+
+A particularly important pattern is:
+
+```text
+small layout / atom
+        ↓
+product
+        ↓
+replicated across threads / tiles
+        ↓
+larger layout
+```
+
+For example, a small **shared-memory atom** can be replicated into a larger tensor layout.
+
+`tile_to_shape(...)` is essentially a higher-level convenience for this kind of operation:
+
+> **"Take this small layout/atom and grow it to this target shape."**
+
+### Mental vocabulary
+
+Keep these four words:
+
+```text
+composition → "view this through that"
+
+complement  → "where can the other copies go?"
+
+divide      → "big → inside tile + which tile"
+
+product     → "small → inside block + which copy"
+```
+
+And for product:
+
+```text
+blocked → copies stay together
+
+raked   → copies are interleaved
+```
+
+That's enough to recognize what's happening when you encounter product-related code in a real kernel.
+
+---
+
+
 
 ---
 
