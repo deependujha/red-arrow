@@ -1,3 +1,12 @@
+---
+title: Plan `Kernel building primitives`
+type: docs
+math: true
+sidebar:
+  open: false
+weight: 1004
+---
+
 > **Recognize the common CuTe building blocks in real kernels, understand what they are doing intuitively, and be able to follow unfamiliar code.**
 
 I would **not** jump directly into TMA/WGMMA/etc. First get comfortable with the small set of concepts that appear everywhere.
