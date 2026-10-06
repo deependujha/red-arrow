@@ -846,32 +846,6 @@ right_inverse:
 
 ---
 
-## 6. Everything at once: `make_layout_tv`
-
-Verified in the DSL:
-
-```python
-thr = (4,8):(8,1)      # 32 threads
-val = (2,2):(2,1)      # 4 values each
-tiler, tv = cute.make_layout_tv(thr, val)                 # (8,16),  ((8,4),(2,2)):((16,2),(8,1))
-
-mn = cute.raked_product(thr, val)                          # (m,n) -> (thread,value) id, interleaved
-tv == cute.composition(cute.right_inverse(mn), cute.make_layout((32, 4)))   # same layout
-```
-
-Read it as a sentence: **product** spreads threads over the tile in a raked way, mapping `(m,n) → (thread, value)`. The **right inverse** flips that into `(thread, value) → (m,n)`, which is what a thread needs ("which element is my v-th value?"). **Composition** with the layout `make_layout((32,4))` just reshapes that 1D inverse into a `(thread, value)` 2-mode layout.
-
----
-
-## 7. Reading checklist (any output)
-
-1. **Split at the top-level modes.** For a divide/product: mode 0 = *inside*, mode 1 = *which*.
-2. **For each mode: size, then stride.** "s positions, each +d."
-3. **Nested mode?** Read sub-modes fast→slow: "first `s0` steps of `d0`, then `s1` steps of `d1`." It appeared because steps crossed a boundary or because two things were zipped together.
-4. **Size-1 modes** have meaningless strides (CuTe often prints them as 0).
-5. **Sanity check** strides: inside-tile strides = the original's; between-tile strides = tile extent × original stride.
-6. Still confused? `python explore.py <section>` prints it as a grid.
-
 ## 8. Cheat sheet
 
 | want to… | use | read the result as |
