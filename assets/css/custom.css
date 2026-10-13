@@ -1,0 +1,7 @@
+h2 {
+    color: var(--tw-prose-headings);
+    background-color: light-dark(#fef08a, #3f3f16);
+    width: fit-content;
+    padding: 0.1em 0.3em;
+    border-radius: 6px;
+}
