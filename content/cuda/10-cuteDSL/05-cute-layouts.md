@@ -379,6 +379,74 @@ L     = cute.make_composed_layout(sw, 0, outer) # row-major first, then scramble
 
 ---
 
+---
+
+## `cute.recast_layout`
+
+- Same memory, **different element size**. You tell CuTe "these bytes used to be X-bit elements, now read them as Y-bit elements", and it gives you the layout in the new units.
+- Argument order is **new bits first, then old bits**: `cute.recast_layout(new_bits, old_bits, layout)`.
+
+### Intuition
+
+Think of a row of 8 bytes:
+
+```
+as 8-bit  : [a][b][c][d][e][f][g][h]     -> 8 elements
+as 16-bit : [ab ][cd ][ef ][gh ]         -> 4 elements
+```
+
+Nothing in memory moved. You're just counting it in bigger (or smaller) chunks.
+
+- **Bigger type** (for example 8 → 16 bits, or upcast by 2):
+  - The fastest dim (the one with stride 1) gets **2x fewer elements**.
+  - Every other stride gets **2x smaller**, because each jump now covers the same bytes using fewer, bigger elements.
+- **Smaller type** (for example 16 → 8 bits, or downcast by 2):
+  - The fastest dim gets **2x more elements**.
+  - Every other stride gets **2x bigger**.
+
+### Examples
+
+```python
+L = cute.make_layout((8, 8), stride=(1, 8))   # 8x8 grid of 8-bit elements
+
+cute.recast_layout(16, 8, L)   # (4,8):(1,4)    pairs of bytes become one 16-bit element
+cute.recast_layout(8, 16, L)   # (16,8):(1,16)  each 16-bit element splits into two bytes
+```
+
+Check that it's the same memory. A column of the original is 8 bytes. After the upcast it's 4 elements × 2 bytes, which is still 8 bytes.
+
+> [!NOTE]
+> Only the **stride-1 mode** changes its shape. That's the dim where neighbouring elements sit right next to each other in memory, so those are the elements that get merged or split. The other modes keep their shape and only rescale their strides.
+
+### Why you'd use it
+
+- **Vectorized copies.** You can view an fp16 buffer as 128-bit chunks, so one instruction moves 8 halves at once.
+- **Packed types.** fp8, int4, and fp4 data is often loaded as bigger words and then unpacked.
+- In all of these, you want to work with the same data in different chunk sizes without rewriting the layout by hand.
+
+> [!CAUTION]
+> The upcast only works cleanly if the stride-1 dim is divisible by the ratio. For 8 → 16 bits that ratio is 2, so the stride-1 dim must be even. You can't merge half an element.
+
+> [!TIP]
+> - Common pattern: write `val_layout` in **bytes** (e.g. 16 bytes per thread = one 128-bit load), then call
+> - `recast_layout(dtype.width, 8, val_layout)` to turn it into elements. The kernel then does vectorized
+> - Loads for any dtype (fp32 → 4 elems, fp16 → 8, fp8 → 16) without hardcoding anything.
+
+- [reference](https://github.com/NVIDIA/cutlass/blob/ee98dbdfd5727085ef86a018009215c2230904e3/examples/python/CuTeDSL/cute/notebooks/elementwise_add.ipynb)
+
+```python
+    coalesced_ldst_bytes = 16
+
+    # Compile time validation: expect same element type for all input tensors
+    assert all(t.element_type == mA.element_type for t in [mA, mB, mC])
+    dtype = mA.element_type
+
+    thr_layout = cute.make_ordered_layout((4, 64), order=(1, 0)) # 256 threads
+    val_layout = cute.make_ordered_layout((16, coalesced_ldst_bytes), order=(1, 0)) # each thread handles 16 rows of 16 bytes
+    val_layout = cute.recast_layout(dtype.width, 8, val_layout) # whatever is the element size, view it as elements instead of bytes
+    tiler_mn, tv_layout = cute.make_layout_tv(thr_layout, val_layout)
+```
+
 ## Quick recap
 
 | Function | Input → Output | One-line intuition |
@@ -388,5 +456,6 @@ L     = cute.make_composed_layout(sw, 0, outer) # row-major first, then scramble
 | `cute.make_ordered_layout` | shape + order → layout | pick which dim is fastest, strides get computed |
 | `cute.make_layout_like` | layout → compact layout | same shape and order, gaps removed |
 | `cute.make_composed_layout` | coord → outer → +offset → inner | normal layout, then a twist (usually a swizzle) |
+| `cute.recast_layout` | new_bits, old_bits, layout → layout | same memory, different element size |
 | `cute.crd2idx` | coord → offset | uses the strides |
 | `cute.idx2crd` | colex index → coord | uses only the shape |
