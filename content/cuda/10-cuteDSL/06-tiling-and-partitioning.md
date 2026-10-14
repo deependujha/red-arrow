@@ -252,3 +252,126 @@ gA = cute.local_tile(A, tiler, (bidx,))       # this CTA's 1024 elements
 >            if cute.elem_less(tCrd[i], C.shape):     # tail: predicated
 >                tC[i] = tA[i] + tB[i]
 > ```
+
+---
+
+## `local_partition`
+
+- **"Which elements does this thread get?"**
+- You give it a thread layout and a thread id, and it gives that thread its share of a tensor.
+
+```python
+thr = cute.make_layout((2, 4), stride=(4, 1))   # 8 threads, ids go along cols first
+tA  = cute.local_partition(gA, thr, tidx)       # gA: (8, 8) -> tA: (4, 2)
+
+# same as:
+gA = cute.zipped_divide(gA, thr)[(tidx, None)]
+```
+
+### `local_tile` vs `local_partition`: same cut, opposite pick
+
+Both cut the tensor into tiles with `zipped_divide`. Then they keep **opposite** parts:
+
+```python
+# local_tile: keep the inside of ONE tile
+zipped_divide(gA, tiler)[(None, tile_coord)]
+
+# local_partition: keep ONE cell from EVERY tile
+zipped_divide(gA, thr_shape)[(thr_coord, None)]
+```
+
+| | picks | keeps |
+|---|---|---|
+| `local_tile` | which tile | everything inside it |
+| `local_partition` | which cell (the thread's spot) | that cell from all tiles |
+
+### Step by step (thread 5)
+
+1. Cut `gA (8,8)` into `(2,4)` tiles, one cell per thread. That gives a `(4,2)` grid of tiles.
+2. Thread 5's spot in `thr` is `(1,1)`, because `1*4 + 1*1 = 5`.
+3. Take cell `(1,1)` from every tile. That's rows `{1,3,5,7}` × cols `{1,5}`.
+
+![local partition visualization](/10-cutedsl/local_partition_viz.png)
+
+- Result shape = number of tiles = `gA.shape / thr.shape = (4, 2)`.
+- A thread's values are **spread out**: they repeat every `thr` shape.
+
+> [!CAUTION]
+> - Call it on the **CTA tile** (`gA` from `local_tile`), not on the whole global tensor. Otherwise every CTA gets the same slices and does the full tensor's work.
+> - The **values per thread are decided by the tensor size**, not by you: `size(gA) / size(thr)`.
+> - Thread id → spot depends on `thr`'s **stride**. `(2,4):(4,1)` and `(2,4):(1,2)` give thread 5 different spots.
+> - Values are **not next to each other** in memory, so you get no vector loads. Each value is its own load.
+
+### Verify: partition an identity tensor
+
+```python
+@cute.jit
+def check():
+    c   = cute.make_identity_tensor((8, 8))
+    thr = cute.make_layout((2, 4), stride=(4, 1))
+    p   = cute.local_partition(c, thr, 5)
+    for i in cutlass.range_constexpr(cute.size(p)):
+        cute.printf("v{} -> {}", i, p[i])
+# v0 (1,1)  v1 (3,1)  v2 (5,1)  v3 (7,1)  v4 (1,5)  v5 (3,5)  v6 (5,5)  v7 (7,5)
+# (values go down the rows first, because colex order makes the first mode fastest)
+```
+
+---
+
+## The pattern you'll use most: `composition` + `[(tidx, None)]`
+
+```python
+# host
+tiler, tv = cute.make_layout_tv(thr_layout, val_layout)
+
+# kernel
+gA = cute.local_tile(A, tiler, (bidx,))          # 1. this CTA's tile
+tA = cute.composition(gA, tv)[(tidx, None)]      # 2. this thread's values
+```
+
+### Why it works
+
+- `tv` maps `(thread, value)` → **position in the tile**. It knows nothing about memory.
+- `gA` maps a **position in the tile** → **real memory**.
+- `composition(gA, tv)` chains the two: `(thread, value)` → position → memory. The result is a tensor shaped like `tv`: `((threads), (values))`.
+- `[(tidx, None)]` fixes the thread and keeps all of its values. That's this thread's view.
+
+```
+composition(gA, tv)      : ((threads), (values)) -> memory
+           [(tidx, None)]:              (values) -> memory   (one thread)
+```
+
+![tv composition visualization](/10-cutedsl/tv_composition_viz.png)
+
+
+> [!IMPORTANT]
+> `gA` must be cut with the **same tiler** that `make_layout_tv` returned. `tv` assumes the tile is exactly `tiler_mn`. With any other tile size, the positions point to the wrong elements.
+
+### How the two compare
+
+| | `local_partition(gA, thr, t)` | `composition(gA, tv)[(t, None)]` |
+|---|---|---|
+| A thread's values | spread out, every `thr` shape | packed in one `val` block |
+| You describe | threads only | threads + values |
+| Values per thread | `size(gA) / size(thr)` (decided by the tensor) | `size(val)` (decided by you) |
+| Vector loads | no (values aren't adjacent) | yes, if the val block is contiguous in memory |
+
+### Same work, different loads (1D, 1024 floats, 256 threads)
+
+```
+local_partition : T0 -> 0, 256, 512, 768     4 separate 4-byte loads
+TV (val = 4)    : T0 -> 0, 1, 2, 3           1 single 16-byte load
+```
+
+- Both are **coalesced**: a warp touches neighbouring addresses each time.
+- Only TV is **vectorized**. A thread's 4 values sit next to each other in memory, so they can be fetched with one 16-byte load. With `local_partition` they're 256 apart, so each one needs its own load.
+- Vectorizing depends on the **layout**, not the API: any layout that gives a thread neighbouring values can vectorize.
+- That's why the vector-add kernel uses `val_layout = make_layout(4)`: 4 fp32 = 16 bytes = one 128-bit load.
+
+### Which one to use
+
+- **TV + composition**: the default choice. You control exactly which values each thread owns, and you get vectorized loads.
+- **`local_partition`**: when you *want* a cyclic split, for example a thread grid sweeping a tile in passes, as in the classic CuTe sgemm tutorial.
+
+> [!TIP]
+> Tail handling works exactly the same way: run the identity tensor through the **same** steps (`local_tile` → `composition` → `[(tidx, None)]`) to get each value's global coordinate, then `elem_less(coord, A.shape)`.
