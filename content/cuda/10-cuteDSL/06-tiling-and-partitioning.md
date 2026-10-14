@@ -481,20 +481,34 @@ tC.store(acc.load().to(tC.element_type))
 ### Naming convention you'll see in real CUTLASS code
 
 ```
-t A g A
-│ │ │ └─ which tensor        (A, B, C, ...)
-│ │ └─── where it lives      g = gmem, s = smem, r = rmem (registers)
-│ └───── partitioned for     A = copy of A, C = MMA on C, ...
-└─────── t = already split per thread
+t  A  s  A
+│  │  │  └─ the data           : which tensor (A, B, C)
+│  │  └──── where it lives     : m / g / s / r / c / p
+│  └─────── partitioned by     : which thread arrangement split it
+└────────── t = per-thread view: this is one thread's share
 ```
 
-- `tAgA` is this thread's slice of A in gmem.
-- `tArA` is the register fragment for those values.
-- `tCrC` is the accumulator fragment for the MMA on C.
+| letter | lives in | example |
+|---|---|---|
+| `m` | whole tensor in gmem (before tiling) | `mA` |
+| `g` | CTA's tile in gmem | `gA` |
+| `s` | tile in smem | `sA` |
+| `r` | registers (fragment) | `tArA`, `tCrC` |
+| `c` | coordinates (identity tensor) | `tAcA` |
+| `p` | predicate mask | `tApA` |
+
+- **Partitioned by** = which thread layout cut the tensor. The **same** tensor can be cut differently for different jobs:
+  - `tAsA`: smem A, cut for **copying A in** (which elements this thread writes).
+  - `tCsA`: the **same** smem A, cut for the **MMA computing C** (which elements this thread reads).
+- The MMA side uses `C` for all its operands (`tCsA`, `tCsB`, `tCrC`), because the MMA computes C.
+- With only one partitioner (e.g. a single TV layout in an elementwise kernel), use one letter for all of them: `tXgA`, `tXgB`, `tXgC`, `tXcC`.
 
 > [!TIP]
-> Typical flow: `tAgA` (gmem slice) → `cute.copy` / `.load()` → `tArA` (fragment) → math / MMA → `tCrC` → `.store()` / `cute.copy` → `tCgC`.
-> The copy APIs on the next page are just the fast, configurable way to do these arrows.
+> Seeing `tAsA` and `tCsA` together means data enters smem with one thread mapping and leaves with another.
+> That handoff is exactly where a `__syncthreads()` / barrier is needed.
+
+> [!TIP]
+> Typical flow: `mA` → `local_tile` → `gA` → partition → `tAgA` → copy → `tAsA` / `tArA` → math / MMA → `tCrC` → `tCgC`.
 
 ---
 
