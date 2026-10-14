@@ -119,3 +119,104 @@ gA = cute.local_tile(mA, tiler, coord, proj=(1, None, 1))
 
 So you write **one** tiler and **one** block coordinate for the whole GEMM, and `dice` picks the right parts for A, B, and C.
 
+---
+
+---
+
+## `make_layout_tv`
+
+- You describe two small things, and it builds the full mapping:
+  - **`thr_layout`**: how threads are arranged across the tile, and how thread ids are numbered.
+  - **`val_layout`**: how each thread's own values are arranged, and how value ids are numbered.
+- It returns two things:
+  - **`tiler_mn`**: the tile shape that all threads together cover in one go.
+  - **`tv_layout`**: a mapping from `(thread_id, value_id)` to a position inside that tile.
+
+```python
+thr_layout = cute.make_layout((2, 3), stride=(3, 1))   # 2 threads along M, 3 along N, ids go along N first
+val_layout = cute.make_layout((2, 2), stride=(2, 1))   # each thread: 2x2 values, ids go along N first
+tiler_mn, tv_layout = cute.make_layout_tv(thr_layout, val_layout)
+
+# tiler_mn  = (4, 6)
+# tv_layout = ((3,2),(2,2)):((8,2),(4,1))
+```
+
+### Tile size = thread shape × value shape (per mode)
+
+```
+tiler_mn = (2*2, 3*2) = (4, 6)
+```
+
+| | count |
+|---|---|
+| threads | 2 × 3 = 6 |
+| values per thread | 2 × 2 = 4 |
+| tile elements | 4 × 6 = 24 = 6 × 4 ✓ |
+
+Another example: `thr (3,4)` with `val (6,7)` gives a tile of `(18, 28)`, covered by 12 threads × 42 values = 504 elements.
+
+### The picture: "who owns this element?"
+
+- Threads arrangement `thr_layout: (2,3):(3,1)`:
+```
+T0 T1 T2
+T3 T4 T5
+```
+- Value arrangement `val_layout: (2,2):(2,1)`:
+```
+V0 V1
+V2 V3
+```
+
+- The TV layout is made by **repeating the `val_layout` over the `thr_layout`**
+
+![tv layout](/10-cutedsl/tv_layout.png)
+
+> [!NOTE]
+> This table goes **(m, n) → (thread, value)**, which is the easy way for us to read it.
+> `tv_layout` goes the **other way**: **(thread, value) → position in the tile**. It's the same information, viewed from the other side.
+
+### Gotchas
+
+> [!CAUTION]
+> - `tv_layout` points into the **tile**, not into memory. It knows nothing about strides in gmem or smem. You only get real memory offsets after combining it with a real tensor.
+> - The printed shape of `tv_layout` won't match `thr_layout`/`val_layout` one-to-one. Its modes are ordered **by id** (thread id, value id), not by M/N.
+> - `thr_layout` and `val_layout` must be **compact** (no gaps).
+> - Use `size(tv_layout, mode=[0])` for the **threads per block** and `size(tv_layout, mode=[1])` for the **values per thread**.
+
+---
+
+## `local_tile`
+
+- **"Which tile does this CTA work on?"**
+- It cuts the tensor into `tiler`-sized tiles, then hands you the one at `coord`.
+
+```python
+gA = cute.local_tile(A, tiler, coord)
+
+# same as:
+gA = cute.zipped_divide(A, tiler)[(None, coord)]
+#     ((TileM, TileN), (RestM, RestN))
+#       ^ keep this     ^ pick one tile
+```
+
+![local tile](/10-cutedsl/cute-local-tile.svg)
+
+### Key points
+
+- **`coord` is a tile coordinate, not an element coordinate.** `(1,2)` means "2nd tile down, 3rd tile across", which starts at element `(4, 8)`.
+- **It returns a tensor**, with the pointer moved to the tile's start. This is the same "slicing a tensor keeps the offset" rule from `slice_`.
+- **It only picks the CTA's tile.** It does not split anything among threads. That's the next step.
+- **Number of CTAs to launch** = the number of tiles = `size(zipped_divide(A, tiler), mode=[1])`.
+
+### Gotcha: the last tile hangs off the edge
+
+> [!CAUTION]
+> If the tensor size isn't a multiple of the tile, the tile count is **rounded up**, but every tile still has the **full tiler shape**.
+>
+> Example: `N = 2500`, `tiler = (1024,)`, so there are 3 tiles.
+> - Tile 2 covers `2048..3071`.
+> - Only `2048..2499` actually exist.
+>
+> The view happily lets you index past the end, and nothing stops you, so you must predicate.
+> Tile the identity tensor the same way (`local_tile(cC, tiler, coord)`) and check `elem_less(coord, A.shape)` before each load/store.
