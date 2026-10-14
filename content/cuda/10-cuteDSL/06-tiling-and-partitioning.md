@@ -200,6 +200,29 @@ gA = cute.zipped_divide(A, tiler)[(None, coord)]
 #       ^ keep this     ^ pick one tile
 ```
 
+### Typical use: tiler from `make_layout_tv`
+
+- `tiler_mn` from `make_layout_tv` is **exactly the area that one CTA's threads cover in one pass** (threads × values).
+- If you use it as the tile size, each CTA's tile fits its threads perfectly: every element gets exactly one (thread, value).
+- `tv_layout` is applied to that tile in the next step.
+
+```python
+# host side (@cute.jit)
+thr_layout = cute.make_layout(256)            # 256 threads
+val_layout = cute.make_layout(4)              # 4 values each
+tiler, tv_layout = cute.make_layout_tv(thr_layout, val_layout)   # tiler = (1024,)
+
+grid = cute.size(cute.zipped_divide(C, tiler), mode=[1])         # number of tiles = number of CTAs
+
+# kernel side (@cute.kernel)
+bidx, _, _ = cute.arch.block_idx()
+gA = cute.local_tile(A, tiler, (bidx,))       # this CTA's 1024 elements
+```
+
+> [!NOTE]
+> The tiler doesn't **have** to come from `make_layout_tv`. In GEMMs the tile shape usually comes from the block/MMA design (e.g. `(128, 128, 64)`), and the threads may cover the tile in several passes. "TV tiler = CTA tile" is the simple case where one pass covers the whole tile.
+
+
 ![local tile](/10-cutedsl/cute-local-tile.svg)
 
 ### Key points
@@ -219,4 +242,13 @@ gA = cute.zipped_divide(A, tiler)[(None, coord)]
 > - Only `2048..2499` actually exist.
 >
 > The view happily lets you index past the end, and nothing stops you, so you must predicate.
-> Tile the identity tensor the same way (`local_tile(cC, tiler, coord)`) and check `elem_less(coord, A.shape)` before each load/store.
+> - Tile the identity tensor the same way (`local_tile(cC, tiler, coord)`) and check `elem_less(coord, A.shape)` before each load/store. [check example](/cuda/10-cutedsl/05-cute-layouts/#identity-layout-vs-identity-tensor)
+> ```python
+> # Check if the current thread's tile is within bounds using the identity tensor
+>    if cute.elem_less(tCrd[cute.size(tCrd) - 1], C.shape):
+>        tC[None] = tA.load() + tB.load()
+>    else:
+>        for i in cutlass.range_constexpr(cute.size(tC)):
+>            if cute.elem_less(tCrd[i], C.shape):     # tail: predicated
+>                tC[i] = tA[i] + tB[i]
+> ```
