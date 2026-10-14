@@ -375,3 +375,137 @@ TV (val = 4)    : T0 -> 0, 1, 2, 3           1 single 16-byte load
 
 > [!TIP]
 > Tail handling works exactly the same way: run the identity tensor through the **same** steps (`local_tile` → `composition` → `[(tidx, None)]`) to get each value's global coordinate, then `elem_less(coord, A.shape)`.
+
+---
+
+---
+
+## Registers: rmem tensors, fragments & TensorSSA
+
+Every kernel ends the same way: get the thread's values into **registers**, do the math there, then write the results back.
+There are two kinds of "things" involved, and mixing them up is the most common source of confusion.
+
+| | **Tensor** (gmem / smem / rmem) | **TensorSSA** |
+|---|---|---|
+| What it is | storage: pointer + layout | just values, a result of math |
+| Can you index it, `t[i]`? | yes | treat it as one whole value |
+| Lives at an address? | yes | no, it lives in registers the compiler picks |
+| You get it from | `make_tensor`, `local_tile`, `make_rmem_tensor`, ... | `tensor.load()`, math on SSA values |
+| You change it by | `t[i] = x`, `t.store(ssa)` | you don't; math makes a new one |
+
+### `load()` and `store()`: moving between the two
+
+```python
+vals = tA.load()          # Tensor -> TensorSSA (reads every element of the view)
+out  = vals + tB.load()   # math on whole TensorSSA values, elementwise
+tC.store(out)             # TensorSSA -> Tensor (writes every element)
+
+tC[None] = tA.load() + tB.load()   # same as tC.store(...)
+```
+
+- `load()`/`store()` work on **any** tensor view: gmem, smem, or rmem. Your vector-add loads straight from a gmem slice.
+- They read/write the **whole view** at once. If the layout puts a thread's values next to each other in memory, this becomes a vectorized load (see the TV section).
+- Math on TensorSSA is **elementwise**: `+ - * /`, comparisons, `.to(dtype)` for casts, and functions from `cute.math`.
+
+```python
+x = tA.load().to(cutlass.Float32)      # fp16 -> fp32 for accurate math
+y = (x * scale).to(cutlass.Float16)    # back to fp16 before writing
+tC.store(y)
+```
+
+> [!CAUTION]
+> `load()`/`store()` have **no bounds check**. On the last tile they happily read/write past the end of the tensor.
+> For tails, loop over the elements and check each coordinate with `elem_less` (as in the vector-add kernel).
+
+> [!WARNING]
+> **TensorSSA math needs the same shape *and* nesting, not just the same size.**
+>
+> ```python
+> # tA : ((2,2)):((1,6))   <- a TV slice is nested
+> acc = cute.make_rmem_tensor(cute.size(tA), cutlass.Float32)   # 4:1, flat
+> acc.load() + tA.load()   # TypeError: profile of input tuples doesn't match: (4, (2, 2))
+> ```
+>
+> Build buffers **from the tensor you'll combine them with**, so the shapes match automatically (see below).
+
+### Fragment = rmem tensor
+
+- A **fragment** is a thread's own small piece of a tile, held in **registers**.
+- In CuTe DSL you create one with `make_rmem_tensor`. The old name was `make_fragment`, and you'll still see "fragment" in CUTLASS code and docs.
+
+```python
+# from a shape (or layout) + dtype: compact col-major
+acc  = cute.make_rmem_tensor(tA.shape, cutlass.Float32)          # ((2,2)) -> ((2,2)):((1,2))
+
+# from an existing tensor: same shape, nesting & stride order (dtype optional)
+rA   = cute.make_rmem_tensor_like(tA)                            # same dtype as tA
+racc = cute.make_rmem_tensor_like(tA, cutlass.Float32)           # same shape, fp32
+racc = cute.make_rmem_tensor_like(tA, dtype=cutlass.Float32)     # keyword works too
+
+# flat buffer: fine when you only index it with [i], e.g. a mask
+pred = cute.make_rmem_tensor(cute.size(tA), cutlass.Boolean)
+```
+
+> [!NOTE]
+> Tested on `nvidia-cutlass-dsl 4.8.0`:
+> - `make_rmem_tensor_like` keeps the source's layout order: a row-major `(2,4):(4,1)` source gives `(2,4):(4,1)` in registers. The changelog says "compact col-major", but that's not what 4.8.0 does.
+> - `make_rmem_tensor` with a plain shape gives compact col-major.
+> - Both keep the **nesting** when you pass `tA` or `tA.shape`, which is what the SSA-math rule above needs.
+
+### When do you actually need an rmem tensor?
+
+For plain `load → math → store`, you **don't**: the TensorSSA already lives in registers.
+You need a real register **buffer** when:
+
+- **The values must survive a loop.** Example: a GEMM accumulator added to across every K tile.
+- **Another op writes into it.** `cute.copy` (gmem → rmem) and `cute.gemm` (MMA) need a destination tensor, not an SSA value.
+- **You build something element by element.** Example: a predicate mask filled in a loop, then used for a copy.
+- **You need to index an SSA result.** Store it into a small rmem tensor first, then use `frag[i]`.
+
+```python
+# accumulator pattern
+acc = cute.make_rmem_tensor_like(tC, cutlass.Float32)        # same shape as tC, but fp32
+for i in cutlass.range_constexpr(cute.size(acc)):
+    acc[i] = 0.0
+for k in range(num_k_tiles):
+    acc.store(acc.load() + tA_k.load().to(cutlass.Float32))   # keeps adding into the same registers
+tC.store(acc.load().to(tC.element_type))
+```
+
+> [!WARNING]
+> **Only index rmem tensors with compile-time indices.** Registers can't be addressed with a runtime index.
+> If you do `frag[i]` with a runtime `i`, the compiler moves the fragment to **local memory**, which is slow and off-chip.
+> - Loop over fragments with `cutlass.range_constexpr`, which unrolls the loop so every index is a constant.
+> - Keep fragment sizes **static**. Their shape must be known at compile time.
+
+### Naming convention you'll see in real CUTLASS code
+
+```
+t A g A
+│ │ │ └─ which tensor        (A, B, C, ...)
+│ │ └─── where it lives      g = gmem, s = smem, r = rmem (registers)
+│ └───── partitioned for     A = copy of A, C = MMA on C, ...
+└─────── t = already split per thread
+```
+
+- `tAgA` is this thread's slice of A in gmem.
+- `tArA` is the register fragment for those values.
+- `tCrC` is the accumulator fragment for the MMA on C.
+
+> [!TIP]
+> Typical flow: `tAgA` (gmem slice) → `cute.copy` / `.load()` → `tArA` (fragment) → math / MMA → `tCrC` → `.store()` / `cute.copy` → `tCgC`.
+> The copy APIs on the next page are just the fast, configurable way to do these arrows.
+
+---
+
+## Quick recap
+
+| Function / idea | Answers |
+|---|---|
+| `slice_`, `dice` | keep some modes, drop others |
+| `make_layout_tv` | thread & value → position in the tile, plus the tile size |
+| `local_tile` | which tile does this CTA work on? |
+| `local_partition` | this thread's cell from every tile (spread out) |
+| `composition(gA, tv)[(tidx, None)]` | this thread's packed values (vectorizable) |
+| `make_rmem_tensor(_like)` | a register buffer that sticks around |
+| `.load()` / `.store()` | Tensor ↔ TensorSSA (storage ↔ values) |
