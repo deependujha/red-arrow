@@ -1,0 +1,413 @@
+---
+title: Copy Atoms, Tiled Copy & cp.async
+type: docs
+math: true
+sidebar:
+  open: false
+weight: 1007
+---
+
+## The big picture
+
+Moving data in CuTe always goes through the same five steps. Each step adds one piece of information, and the final `cute.copy` just executes the plan.
+
+![copy layers](/10-cutedsl/copy-layers.svg)
+
+```python
+atom       = cute.make_copy_atom(op, dtype, num_bits_per_copy=128)   # 1. what ONE instruction does
+tiled_copy = cute.make_tiled_copy_tv(atom, thr_layout, val_layout)   # 2. the whole block's plan
+thr_copy   = tiled_copy.get_slice(tidx)                              # 3. this thread's spot in the plan
+tXgA       = thr_copy.partition_S(gA)                                # 4. what this thread reads...
+tXsA       = thr_copy.partition_D(sA)                                #    ...and where it writes
+cute.copy(tiled_copy, tXgA, tXsA)                                    # 5. go
+```
+
+### The story version
+
+A class is moving toy blocks from a big **shelf** (global memory) to the **desks/table** (registers/shared memory).
+
+| Story | CuTe |
+|---|---|
+| What one trip looks like: one box, 8 blocks, carried by hand | copy atom |
+| The class plan: 128 kids in 8 rows of 16, one box each per round | tiled copy |
+| "You're kid #37, here's your spot" | `get_slice(tidx)` |
+| Kid #37's lists: "take from these shelf spots, put on these desk spots" | `partition_S` / `partition_D` |
+| "Go!" Every kid follows their list, round after round | `cute.copy` |
+
+All the thinking happens in steps 1–4. Step 5 is mechanical.
+
+---
+
+## 1. Copy atom: what one instruction does
+
+A copy atom describes the **smallest copy the hardware does in one instruction**:
+
+- **which instruction** (the op),
+- **which element type**,
+- **how many bits** move per instruction.
+
+```python
+atom = cute.make_copy_atom(
+    cute.nvgpu.CopyUniversalOp(),   # which instruction family: plain load/store
+    cutlass.Float16,                # element type
+    num_bits_per_copy=128,          # bits per instruction: 128 bits = 8 fp16 = 16 bytes
+)
+```
+
+### The op picks the hardware path
+
+| Op | What it is | Route |
+|---|---|---|
+| `cute.nvgpu.CopyUniversalOp()` | normal load/store (LDG/STG, LDS/STS) | anything → anything |
+| `cpasync.CopyG2SOp()` | `cp.async`, Ampere+ | gmem → smem only, asynchronous |
+| TMA ops (`cpasync.CopyBulkTensorTile...`) | Tensor Memory Accelerator, Hopper+ | whole tiles, gmem ↔ smem |
+| `warp.LdMatrix...` / `warp.StMatrix...` | warp-wide smem ↔ register shuffles for MMA | smem ↔ registers |
+
+### `num_bits_per_copy` = vector width
+
+- `128` means one 128-bit instruction (LDG.128 / STG.128). That's the widest normal load, and the one you want for bandwidth.
+- `64` or `32` means smaller instructions. More of them are needed to move the same data.
+
+### Single-thread vs warp-wide atoms
+
+- Most atoms are executed by **one thread**: "thread t moves its 16 bytes".
+- Some atoms need a **whole warp cooperating** on one instruction (`ldmatrix`, `stmatrix`). Because of these, an atom carries its own small thread/value layout. You won't need to think about that until the MMA page.
+
+> [!CAUTION]
+> **Alignment:** a 128-bit atom needs **16-byte-aligned** addresses.
+> Tell CuTe the tensor is aligned when you wrap it: `from_dlpack(t, assumed_align=16)`.
+> Without that, the compiler can't prove alignment and will refuse (or fall back to narrower copies).
+
+---
+
+## 2. Tiled copy: the atom repeated over threads and values
+
+```python
+thr = cute.make_ordered_layout((8, 16), order=(1, 0))   # 128 threads, ids go along N first
+val = cute.make_layout((1, 8))                          # each thread: 1 row × 8 fp16 = 16 bytes
+tiled_copy = cute.make_tiled_copy_tv(atom, thr, val)    # covers an (8, 128) patch per pass
+```
+
+- This is **`make_layout_tv(thr, val)` from the partitioning page, plus the atom**.
+  - `thr` and `val` say *which thread owns which values* (exactly like before).
+  - The atom says *which instruction moves them*.
+- **One pass** covers `thr × val` per mode: `(8·1, 16·8) = (8, 128)`.
+- Pick `val` so it **matches the atom's width**: 8 fp16 = 128 bits = exactly one atom call per thread per pass.
+
+> [!TIP]
+> Choosing `thr` with ids along the contiguous dimension (`order=(1,0)` for a row-major tensor) means neighbouring threads read neighbouring 16-byte chunks.
+> One row of 16 threads × 16 B = 256 contiguous bytes, so loads are coalesced **and** vectorized.
+
+---
+
+## 3–4. `get_slice` and `partition_S` / `partition_D`
+
+```python
+thr_copy = tiled_copy.get_slice(tidx)   # "you're thread tidx"
+tXgA = thr_copy.partition_S(gA)         # source view: what this thread reads
+tXsA = thr_copy.partition_D(sA)         # destination view: where this thread writes
+```
+
+### The shape you'll see everywhere: `(CPY, CPY_M, CPY_N)`
+
+```
+( CPY , CPY_M , CPY_N )
+   │      └──────┴── how many times the atom repeats to cover the tile
+   └── the values ONE atom call moves
+```
+
+Example: the CTA tile `gA` is `(32, 128)`, but one pass covers only `(8, 128)`.
+
+![copy partition](/10-cutedsl/copy-partition.svg)
+
+- Thread 17 sits at thr coord `(1,1)`, so in **every pass** it moves the same relative 8-value chunk.
+- `tXgA` has shape ≈ `((8), 4, 1)`: 8 values per atom call, 4 passes down M, 1 pass across N.
+- `cute.copy` will fire the atom 4 times for this thread.
+
+> [!NOTE]
+> This is the big upgrade over `composition(gA, tv)[(tidx, None)]` from the previous page:
+> - The tile can be **bigger than one pass**. The `CPY_M`/`CPY_N` modes handle the repeats automatically.
+> - The **instruction is fixed up front** (a 128-bit atom), instead of hoping `.load()` vectorizes.
+
+| Partitioning page | Copy page |
+|---|---|
+| `make_layout_tv(thr, val)` | `make_tiled_copy_tv(atom, thr, val)` |
+| `composition(gA, tv)[(tidx, None)]` | `tiled_copy.get_slice(tidx).partition_S(gA)` |
+| `tA.load()` / `.store()` | `cute.copy(tiled_copy, src, dst)` |
+| tile = exactly one pass | tile = any number of passes |
+
+### Why two partition functions (S and D)?
+
+Because for some instructions, **the thread that reads a value isn't the thread that ends up holding it.**
+
+![partition S vs D](/10-cutedsl/partition-s-vs-d.svg)
+
+- **Plain copy** (`CopyUniversalOp`, `cp.async`): thread 37 reads 8 values, and thread 37 holds those 8 values. Source and destination use the **same** map, so `partition_S` and `partition_D` cut identically.
+- **Shuffling copy** (`ldmatrix`, `stmatrix`): one warp-wide instruction reads rows in one arrangement and hands the values out in a **different** arrangement (the one the tensor cores want). So a tiled copy carries **two** TV maps:
+  - `partition_S` uses the **source** map: "which values does thread t read?"
+  - `partition_D` uses the **destination** map: "which values does thread t receive?"
+
+In the story: normally each kid carries their own box to their own desk. With a **conveyor belt**, kid #37 loads blocks from row 37 onto the belt, but the belt drops blocks at desks in a different order. So each kid needs two lists: "where I load from" and "what lands on my desk".
+
+> [!TIP]
+> Always use `partition_S` for the source and `partition_D` for the destination, even when they'd give the same result.
+> Then swapping the atom for `ldmatrix` later doesn't silently break your code.
+
+---
+
+## 5. `cute.copy`: execute the plan
+
+```python
+cute.copy(tiled_copy, tXgA, tXrA)   # src, dst
+```
+
+- It loops over `CPY_M × CPY_N` and fires the atom on each `CPY` chunk.
+- Pass the **tiled copy** (the full plan), not the bare atom.
+- **Source and destination partitions must match in shape.** The easy way is to create the register buffer from the source partition:
+
+```python
+  tXrA = cute.make_rmem_tensor_like(tXgA)
+```
+
+> [!CAUTION]
+> `cute.copy` has **no bounds check**. For a tile hanging off the edge of the tensor, pass a predicate tensor (one bool per atom call), built from an identity tensor partitioned the **same way**.
+> (Tail handling gets its own section later.)
+
+### Run it: gmem → registers → gmem with 128-bit copies
+
+```python
+import torch
+import cutlass
+import cutlass.cute as cute
+from cutlass.cute.runtime import from_dlpack
+
+
+@cute.kernel
+def copy_kernel(mA: cute.Tensor, mB: cute.Tensor):
+    tidx, _, _ = cute.arch.thread_idx()
+    bm, bn, _ = cute.arch.block_idx()
+
+    atom = cute.make_copy_atom(cute.nvgpu.CopyUniversalOp(), mA.element_type, num_bits_per_copy=128)
+    thr = cute.make_ordered_layout((8, 16), order=(1, 0))      # 128 threads
+    val = cute.make_layout((1, 8))                             # 8 fp16 = 16 B per thread
+    tiled_copy = cute.make_tiled_copy_tv(atom, thr, val)       # (8,128) per pass
+
+    gA = cute.local_tile(mA, (32, 128), (bm, bn))              # CTA tile = 4 passes
+    gB = cute.local_tile(mB, (32, 128), (bm, bn))
+
+    thr_copy = tiled_copy.get_slice(tidx)
+    tXgA = thr_copy.partition_S(gA)
+    tXgB = thr_copy.partition_D(gB)
+    tXrA = cute.make_rmem_tensor_like(tXgA)
+
+    print(f"tXgA: {tXgA.type}")
+    print(f"tXrA: {tXrA.type}")
+
+    cute.copy(tiled_copy, tXgA, tXrA)          # gmem -> registers (128-bit loads)
+    tXrA.store(tXrA.load() + tXrA.load())      # x2
+    cute.copy(tiled_copy, tXrA, tXgB)          # registers -> gmem (128-bit stores)
+
+
+@cute.jit
+def launch(mA: cute.Tensor, mB: cute.Tensor):
+    copy_kernel(mA, mB).launch(
+        grid=[mA.shape[0] // 32, mA.shape[1] // 128, 1],
+        block=[128, 1, 1],
+    )
+
+
+if __name__ == "__main__":
+    A = torch.randn(64, 256, dtype=torch.float16, device="cuda")
+    B = torch.empty_like(A)
+    launch(from_dlpack(A, assumed_align=16), from_dlpack(B, assumed_align=16))
+    torch.cuda.synchronize()
+    print("correct:", torch.allclose(B, 2 * A))
+```
+
+> [!WARNING]
+> **Expected (not yet verified):** `tXgA` ≈ `((8,...), 4, 1)` and `correct: True`.
+> Experiment: change `num_bits_per_copy` to `64` without changing `val`. The `CPY` mode should split the 8 values into two 64-bit calls.
+> *Replace this box with the real output after running.*
+
+---
+
+## `cp.async`: copy straight into shared memory, asynchronously
+
+`cp.async` (Ampere+, so it works on the L4) keeps **all five steps**. It changes **where the data goes** and **when it arrives**, which adds a "wait for it" step at the end.
+
+![cp.async route](/10-cutedsl/cp-async-route.svg)
+
+| | Plain copy (`CopyUniversalOp`) | `cp.async` (`cpasync.CopyG2SOp`) |
+|---|---|---|
+| Route | gmem → **registers** → smem | gmem → **smem directly** (registers skipped) |
+| When `cute.copy` returns | when the data is in registers | **immediately**; the data arrives later |
+| Destination | anything | **must be shared memory** |
+| Before you can read the data | nothing extra | **commit → wait → barrier** |
+| Bytes per instruction | any supported width | 4, 8 or 16 |
+| `partition_S` vs `partition_D` | same map | same map (still one thread per instruction) |
+
+### The story version
+
+Before, each kid **walked the box over** and stood there until it was on their desk.
+
+With `cp.async`, each kid **places a delivery order**. The truck brings the blocks straight to the **shared table** in the middle of the room (smem), and the kid walks away immediately to do other work. That comes with three rules:
+
+1. **Commit:** staple your orders into one **batch**. "These belong together."
+2. **Wait:** "Wait until no more than **N** of *my* batches are still on the road." N = 0 means wait for all of them.
+3. **Barrier:** **everyone waits for everyone.** The shared table holds blocks *other kids* ordered, and step 2 only covers **your own** deliveries.
+
+### In code
+
+```python
+from cutlass.cute.nvgpu import cpasync
+
+atom = cute.make_copy_atom(
+    cpasync.CopyG2SOp(),            # cp.async: gmem -> smem
+    cutlass.Float16,
+    num_bits_per_copy=128,          # 16 B per instruction
+)
+tiled_copy = cute.make_tiled_copy_tv(atom, thr, val)
+thr_copy   = tiled_copy.get_slice(tidx)
+
+tXgA = thr_copy.partition_S(gA)     # source: gmem
+tXsA = thr_copy.partition_D(sA)     # destination: MUST be smem
+
+cute.copy(tiled_copy, tXgA, tXsA)   # 1. place the orders (returns right away)
+cute.arch.cp_async_commit_group()   # 2. staple them into one batch
+cute.arch.cp_async_wait_group(0)    # 3. wait until 0 of MY batches are still in flight
+cute.arch.barrier()                 # 4. wait for EVERY thread's deliveries
+# sA is now safe to read
+```
+
+### Cache mode (optional)
+
+```python
+cpasync.CopyG2SOp(cache_mode=cute.nvgpu.LoadCacheMode.GLOBAL)
+```
+
+- `GLOBAL` is `cp.async.cg`: caches in L2 only and skips L1. It's good for streaming data you'll only read once from smem. It only works with **16-byte** copies.
+- The default caches in L1 as well (`.ca`) and works with 4, 8 or 16 bytes.
+
+> [!CAUTION]
+> - **Forgetting the barrier** is the classic bug. `wait_group` only covers *your* thread's copies, but you'll usually read smem that **other threads** loaded. Without the barrier, you read half-arrived data, sometimes, depending on timing.
+> - The destination must be **smem**. `cp.async` can't write to registers or global memory.
+> - 16-byte copies need 16-byte alignment on **both** sides (gmem and smem).
+
+### Why bother? Overlap.
+
+Done once like above, `cp.async` is **no faster** than a plain load: you order and then immediately wait. The win comes from **ordering the next tile while computing on the current one**. This is called **double buffering**:
+
+![double buffering](/10-cutedsl/cp-async-double-buffer.svg)
+
+```
+order tile 0 -> buf 0, commit
+loop k:
+    order tile k+1 -> other buf, commit   # truck is on the road
+    wait_group(1)                         # tile k arrived; only tile k+1 may still be travelling
+    barrier
+    compute on tile k
+    barrier                               # nobody may overwrite a buffer someone is still reading
+```
+
+- `wait_group(N)` takes a number for exactly this reason: **keep N batches in flight** while you compute.
+- With 2 buffers, use `wait_group(1)`. With 3 buffers (3 stages), use `wait_group(2)`, and so on.
+- On the last iteration there's nothing new to order, so use `wait_group(0)`.
+- This is the first step of **pipelining**. The pipelining page builds on exactly this loop.
+
+### Run it: gmem → smem with `cp.async`, read back by *different* threads
+
+This example loads with one thread arrangement and reads smem with **another**, so each thread reads values that other threads loaded. That's exactly the situation where the barrier is required.
+
+```python
+import torch
+import cutlass
+import cutlass.cute as cute
+from cutlass.cute.nvgpu import cpasync
+from cutlass.cute.runtime import from_dlpack
+
+TILE = (32, 128)
+
+
+@cute.kernel
+def cpasync_kernel(mA: cute.Tensor, mB: cute.Tensor):
+    tidx, _, _ = cute.arch.thread_idx()
+    bm, bn, _ = cute.arch.block_idx()
+
+    # one CTA tile in shared memory, row-major
+    smem = cutlass.utils.SmemAllocator()
+    sA = smem.allocate_tensor(
+        mA.element_type, cute.make_ordered_layout(TILE, order=(1, 0)), byte_alignment=16
+    )
+
+    gA = cute.local_tile(mA, TILE, (bm, bn))
+    gB = cute.local_tile(mB, TILE, (bm, bn))
+
+    # LOAD plan: cp.async, threads as (8,16), 8 fp16 each
+    load_atom = cute.make_copy_atom(cpasync.CopyG2SOp(), mA.element_type, num_bits_per_copy=128)
+    load = cute.make_tiled_copy_tv(
+        load_atom, cute.make_ordered_layout((8, 16), order=(1, 0)), cute.make_layout((1, 8))
+    )
+    thr_load = load.get_slice(tidx)
+    cute.copy(load, thr_load.partition_S(gA), thr_load.partition_D(sA))
+    cute.arch.cp_async_commit_group()
+    cute.arch.cp_async_wait_group(0)
+    cute.arch.barrier()                  # remove this and the result can break
+
+    # READ plan: a DIFFERENT arrangement (32,4), so threads read what others loaded
+    read_atom = cute.make_copy_atom(cute.nvgpu.CopyUniversalOp(), mA.element_type, num_bits_per_copy=128)
+    read = cute.make_tiled_copy_tv(
+        read_atom, cute.make_ordered_layout((32, 4), order=(1, 0)), cute.make_layout((1, 8))
+    )
+    thr_read = read.get_slice(tidx)
+    tRsA = thr_read.partition_S(sA)
+    tRgB = thr_read.partition_D(gB)
+    tRrA = cute.make_rmem_tensor_like(tRsA)
+    cute.copy(read, tRsA, tRrA)          # smem -> registers
+    cute.copy(read, tRrA, tRgB)          # registers -> gmem
+
+
+@cute.jit
+def launch(mA: cute.Tensor, mB: cute.Tensor):
+    cpasync_kernel(mA, mB).launch(
+        grid=[mA.shape[0] // TILE[0], mA.shape[1] // TILE[1], 1],
+        block=[128, 1, 1],
+        smem=TILE[0] * TILE[1] * 2 + 128,   # fp16 tile + alignment slack
+    )
+
+
+if __name__ == "__main__":
+    A = torch.randn(64, 256, dtype=torch.float16, device="cuda")
+    B = torch.empty_like(A)
+    launch(from_dlpack(A, assumed_align=16), from_dlpack(B, assumed_align=16))
+    torch.cuda.synchronize()
+    print("correct:", torch.equal(A, B))
+```
+
+> [!WARNING]
+> **Not yet verified:** the `SmemAllocator.allocate_tensor(...)` call and the `smem=` launch argument. Check them against the version you have installed.
+> Expected: `correct: True`.
+> *Replace this box with the real output after running.*
+
+> [!NOTE]
+> The read side here (32 threads down a row-major `(32,128)` smem tile) is likely to cause **bank conflicts**, because many threads hit the same banks.
+> That's not a bug in this toy example. It's the problem **swizzling** solves, coming in the next section.
+
+---
+
+## Quick recap
+
+| Piece | Answers |
+|---|---|
+| copy atom | which instruction, which dtype, how many bits per call |
+| `make_tiled_copy_tv` | the whole block's plan: atom × threads × values, one pass at a time |
+| `get_slice(tidx)` | this thread's spot in the plan |
+| `partition_S` / `partition_D` | what this thread reads / where it writes, shaped `(CPY, CPY_M, CPY_N)` |
+| `cute.copy` | fire the atom `CPY_M × CPY_N` times |
+| `cp.async` | gmem → smem directly; returns at once; **commit → wait → barrier** before reading |
+| double buffering | order tile k+1 while computing tile k; `wait_group(N)` keeps N in flight |
+
+---
+
+## Next: TMA & swizzling
+
+*(to be continued)*
