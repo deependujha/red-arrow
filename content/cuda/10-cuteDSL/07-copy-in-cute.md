@@ -22,20 +22,6 @@ tXsA       = thr_copy.partition_D(sA)                                #    ...and
 cute.copy(tiled_copy, tXgA, tXsA)                                    # 5. go
 ```
 
-### The story version
-
-A class is moving toy blocks from a big **shelf** (global memory) to the **desks/table** (registers/shared memory).
-
-| Story | CuTe |
-|---|---|
-| What one trip looks like: one box, 8 blocks, carried by hand | copy atom |
-| The class plan: 128 kids in 8 rows of 16, one box each per round | tiled copy |
-| "You're kid #37, here's your spot" | `get_slice(tidx)` |
-| Kid #37's lists: "take from these shelf spots, put on these desk spots" | `partition_S` / `partition_D` |
-| "Go!" Every kid follows their list, round after round | `cute.copy` |
-
-All the thinking happens in steps 1–4. Step 5 is mechanical.
-
 ---
 
 ## 1. Copy atom: what one instruction does
@@ -47,10 +33,13 @@ A copy atom describes the **smallest copy the hardware does in one instruction**
 - **how many bits** move per instruction.
 
 ```python
+dtype = input_tensor.element_type # or, `input_tensor.dtype`, or specify directly `cutlass.Float16`
+dtype_width = dtype.width # gives the number of bits per element
+
 atom = cute.make_copy_atom(
     cute.nvgpu.CopyUniversalOp(),   # which instruction family: plain load/store
-    cutlass.Float16,                # element type
-    num_bits_per_copy=128,          # bits per instruction: 128 bits = 8 fp16 = 16 bytes
+    dtype,                          # element type
+    num_bits_per_copy=128,          # bits per instruction: 128 bits => no. of vectorized elements per instruction = 128 / dtype_width
 )
 ```
 
@@ -63,6 +52,39 @@ atom = cute.make_copy_atom(
 | TMA ops (`cpasync.CopyBulkTensorTile...`) | Tensor Memory Accelerator, Hopper+ | whole tiles, gmem ↔ smem |
 | `warp.LdMatrix...` / `warp.StMatrix...` | warp-wide smem ↔ register shuffles for MMA | smem ↔ registers |
 
+#### Simple COPY ops
+
+for more info, [check here](https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/cute_dsl_api/cute_nvgpu_common.html#cutlass.cute.nvgpu.CopyUniversalOp)
+
+- `cutlass.cute.nvgpu.CopyUniversalOp`: The universal Copy Operation.
+
+This operation is equivalent to the `a = b` assignment without any extra memory attributes. For advanced memory features (memory order, memory scope, cache eviction priority, invariant loads, etc.) please use the specialized copy operations instead:
+- **`CopyG2ROp`** : global memory to register
+- **`CopyR2GOp`** : register to global memory
+- **`CopyS2ROp`** : shared memory to register
+- **`CopyR2SOp`** : register to shared memory
+
+```python
+op = cute.nvgpu.CopyG2ROp()
+atom = cute.make_copy_atom(
+    op,
+    tensor_dtype,
+    num_bits_per_copy=64,
+    memory_order=cute.nvgpu.MemoryOrder.VOLATILE,
+    memory_scope=cute.nvgpu.MemoryScope.SYS,
+    l2_prefetch_size=cute.nvgpu.L2PrefetchSize.NONE,
+    l1c_evict_priority=cute.nvgpu.CacheEvictionPriority.EVICT_NORMAL,
+    load_cache_mode=cute.nvgpu.LoadCacheMode.ALWAYS,
+    shared_space=cute.nvgpu.SharedSpace.CTA,
+    invariant=False,
+)
+```
+
+> [!warning]
+> - As you can see in simple copy atoms, `G <-> R`, `R <-> G`, `S <-> R`, `R <-> S`; but we can't directly go from `G <-> S` or `S <-> G`.
+> - So, if you need to move data between global and shared memory, you will have to go through registers as an intermediate step.
+> - `cp.async` can be used for asynchronous copies from global memory to shared memory, typically on Ampere+ GPUs.
+
 ### `num_bits_per_copy` = vector width
 
 - `128` means one 128-bit instruction (LDG.128 / STG.128). That's the widest normal load, and the one you want for bandwidth.
@@ -74,9 +96,13 @@ atom = cute.make_copy_atom(
 - Some atoms need a **whole warp cooperating** on one instruction (`ldmatrix`, `stmatrix`). Because of these, an atom carries its own small thread/value layout. You won't need to think about that until the MMA page.
 
 > [!CAUTION]
-> **Alignment:** a 128-bit atom needs **16-byte-aligned** addresses.
-> Tell CuTe the tensor is aligned when you wrap it: `from_dlpack(t, assumed_align=16)`.
-> Without that, the compiler can't prove alignment and will refuse (or fall back to narrower copies).
+> - **Alignment:** A 128-bit atom requires addresses aligned to **16 bytes** (128 bits = 16 bytes).
+> - When wrapping the tensor, tell CuTe about its alignment:
+> ```python
+> from_dlpack(t, assumed_align=16)
+> ```
+>   CUDA allocations have at least 256-byte alignment under the documented [CUDA allocation guarantees](https://docs.nvidia.com/cuda/archive/9.2/cuda-c-programming-guide), so `assumed_align=16` is safe for CUDA-allocated tensors. This is a compiler hint, not a runtime check.
+> - Without sufficient alignment information, the compiler may reject the operation or generate narrower copies.
 
 ---
 
