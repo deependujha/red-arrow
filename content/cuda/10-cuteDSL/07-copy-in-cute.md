@@ -121,8 +121,10 @@ tiled_copy = cute.make_tiled_copy_tv(atom, thr, val)    # covers an (8, 128) pat
 - Pick `val` so it **matches the atom's width**: 8 fp16 = 128 bits = exactly one atom call per thread per pass.
 
 > [!TIP]
-> Choosing `thr` with ids along the contiguous dimension (`order=(1,0)` for a row-major tensor) means neighbouring threads read neighbouring 16-byte chunks.
-> One row of 16 threads × 16 B = 256 contiguous bytes, so loads are coalesced **and** vectorized.
+> - Choosing `thr` with ids along the contiguous dimension (**`order=(1,0)`** for a row-major tensor) means neighbouring threads read neighbouring 16-byte chunks.
+> - One row of 16 threads × 16 B = 256 contiguous bytes, so loads are **`coalesced`** **and** **`vectorized`**.
+
+![tiled copy layout](/10-cutedsl/tiled-copy.png)
 
 ---
 
@@ -226,34 +228,62 @@ def copy_kernel(mA: cute.Tensor, mB: cute.Tensor):
     tXgB = thr_copy.partition_D(gB)
     tXrA = cute.make_rmem_tensor_like(tXgA)
 
-    print(f"tXgA: {tXgA.type}")
-    print(f"tXrA: {tXrA.type}")
+    print(f"{tXgA=};\n\n{thr_copy=}")
+    print(f"{tXrA=}")
 
     cute.copy(tiled_copy, tXgA, tXrA)          # gmem -> registers (128-bit loads)
-    tXrA.store(tXrA.load() + tXrA.load())      # x2
+    val = tXrA.load()
+    # tXrA.store((tXrA.load() **2).to(tXgA.element_type))    # since 2 is a python literal, it will generate f32, so we would need to cast back to fp16
+    new_val = (val*val) # this approach keeps the computation in fp16 without promoting to f32
+    tXrA.store(new_val)
     cute.copy(tiled_copy, tXrA, tXgB)          # registers -> gmem (128-bit stores)
 
 
 @cute.jit
 def launch(mA: cute.Tensor, mB: cute.Tensor):
+    grid_x = cute.ceil_div(mA.shape[0], 32)
+    grid_y = cute.ceil_div(mA.shape[1], 128)
+
     copy_kernel(mA, mB).launch(
-        grid=[mA.shape[0] // 32, mA.shape[1] // 128, 1],
+        grid=[grid_x, grid_y, 1],
         block=[128, 1, 1],
     )
 
-
-if __name__ == "__main__":
-    A = torch.randn(64, 256, dtype=torch.float16, device="cuda")
+def main():
+    A = torch.randn(150, 256, dtype=torch.float16, device="cuda")
     B = torch.empty_like(A)
     launch(from_dlpack(A, assumed_align=16), from_dlpack(B, assumed_align=16))
     torch.cuda.synchronize()
-    print("correct:", torch.allclose(B, 2 * A))
+    print("correct:", torch.allclose(B, A**2))
+
+main()
+
+# print ptx
+A = torch.randn(128, 256, dtype=torch.float16, device="cuda")
+B = torch.empty_like(A)
+
+compiled = cute.compile(launch, from_dlpack(A, assumed_align=16), from_dlpack(B, assumed_align=16), options="--keep-ptx")   # host_fn is the @cute.jit function
+
+print(compiled.__ptx__)
 ```
 
-> [!WARNING]
-> **Expected (not yet verified):** `tXgA` ≈ `((8,...), 4, 1)` and `correct: True`.
-> Experiment: change `num_bits_per_copy` to `64` without changing `val`. The `CPY` mode should split the 8 values into two 64-bit calls.
-> *Replace this box with the real output after running.*
+> Through PTX, we can verify it uses `vectorized float4` for loading & saving:
+> ```ptx
+> ld.global.v4.b32 	{%r13, %r14, %r15, %r16}, [%rd4];
+> ld.global.v4.b32 	{%r17, %r18, %r19, %r20}, [%rd4+4096];
+> ld.global.v4.b32 	{%r21, %r22, %r23, %r24}, [%rd4+8192];
+> ld.global.v4.b32 	{%r25, %r26, %r27, %r28}, [%rd4+12288];
+> ```
+
+> [!important] 
+> Typical approach when dealing with 2D tensors, is to have 1d threadsPerBlock, and use `thr_layout` to map threads to the 2D tile efficiently.
+> and, 2d blocksPerGrid.
+>
+> Thought process:
+> 1. Think what each tile should look like on CTA (block level).
+> 2. Decide how threads map to elements within the tile (thread-level mapping) & the layout of values that each thread loads and stores aiming for **efficient memory access (`vectorized & coalesced`)**.
+> 3. If CTA tile are (M,N); then blocksPerGrid should cover the entire tensor accordingly (ceil_div(X, M), ceil_div(Y, N)).
+
 
 ---
 
