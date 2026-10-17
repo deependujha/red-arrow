@@ -198,7 +198,7 @@ cute.copy(tiled_copy, tXgA, tXrA)   # src, dst
 ```
 
 > [!CAUTION]
-> `cute.copy` has **no bounds check**. For a tile hanging off the edge of the tensor, pass a predicate tensor (one bool per atom call), built from an identity tensor partitioned the **same way**.
+> `cute.copy` has **no bounds check**. For a tile hanging off the edge of the tensor, pass a predicate tensor (same shape as the partition, one bool per element), built from an identity tensor partitioned the **same way**.
 > (Tail handling gets its own section later.)
 
 ### Run it: gmem → registers → gmem with 128-bit copies
@@ -211,7 +211,7 @@ from cutlass.cute.runtime import from_dlpack
 
 
 @cute.kernel
-def copy_kernel(mA: cute.Tensor, mB: cute.Tensor):
+def copy_kernel(mA: cute.Tensor, mB: cute.Tensor, cA: cute.Tensor):
     tidx, _, _ = cute.arch.thread_idx()
     bm, bn, _ = cute.arch.block_idx()
 
@@ -222,29 +222,40 @@ def copy_kernel(mA: cute.Tensor, mB: cute.Tensor):
 
     gA = cute.local_tile(mA, (32, 128), (bm, bn))              # CTA tile = 4 passes
     gB = cute.local_tile(mB, (32, 128), (bm, bn))
+    gC = cute.local_tile(cA, (32, 128), (bm, bn))                   # same tile, but coordinates
+
 
     thr_copy = tiled_copy.get_slice(tidx)
     tXgA = thr_copy.partition_S(gA)
     tXgB = thr_copy.partition_D(gB)
+    tXcA = thr_copy.partition_S(gC)
     tXrA = cute.make_rmem_tensor_like(tXgA)
 
+    # one bool per atom call, shaped like the copy expects: (1, rest of tXgA)
+    tXpA = cute.make_rmem_tensor((1, tXgA.shape[1]), cutlass.Boolean)
+    cpy = cute.size(tXcA, mode=[0])                   # 8 values per atom call
+    for j in cutlass.range_constexpr(cute.size(tXpA)):
+        # linear index j*cpy = first element of the j-th atom call
+        tXpA[j] = cute.elem_less(tXcA[j * cpy], mA.shape)
+    
     print(f"{tXgA=};\n\n{thr_copy=}")
     print(f"{tXrA=}")
 
-    cute.copy(tiled_copy, tXgA, tXrA)          # gmem -> registers (128-bit loads)
+    cute.copy(tiled_copy, tXgA, tXrA, pred=tXpA)   # masked load: skips rows past the edge)
     val = tXrA.load()
-    # tXrA.store((tXrA.load() **2).to(tXgA.element_type))    # since 2 is a python literal, it will generate f32, so we would need to cast back to fp16
-    new_val = (val*val) # this approach keeps the computation in fp16 without promoting to f32
+    new_val = (val*val)
     tXrA.store(new_val)
-    cute.copy(tiled_copy, tXrA, tXgB)          # registers -> gmem (128-bit stores)
+    cute.copy(tiled_copy, tXrA, tXgB, pred=tXpA)          # registers -> gmem (128-bit stores)
 
 
 @cute.jit
 def launch(mA: cute.Tensor, mB: cute.Tensor):
+    cA = cute.make_identity_tensor(mA.shape)       # coordinate "tensor", no memory
+
     grid_x = cute.ceil_div(mA.shape[0], 32)
     grid_y = cute.ceil_div(mA.shape[1], 128)
 
-    copy_kernel(mA, mB).launch(
+    copy_kernel(mA, mB, cA).launch(
         grid=[grid_x, grid_y, 1],
         block=[128, 1, 1],
     )
@@ -258,7 +269,7 @@ def main():
 
 main()
 
-# print ptx
+# ==== print ptx ====
 A = torch.randn(128, 256, dtype=torch.float16, device="cuda")
 B = torch.empty_like(A)
 
@@ -275,14 +286,45 @@ print(compiled.__ptx__)
 > ld.global.v4.b32 	{%r25, %r26, %r27, %r28}, [%rd4+12288];
 > ```
 
-> [!important] 
-> Typical approach when dealing with 2D tensors, is to have 1d threadsPerBlock, and use `thr_layout` to map threads to the 2D tile efficiently.
-> and, 2d blocksPerGrid.
+> [!IMPORTANT]
+> **How to design a copy kernel for a 2D tensor**
 >
-> Thought process:
-> 1. Think what each tile should look like on CTA (block level).
-> 2. Decide how threads map to elements within the tile (thread-level mapping) & the layout of values that each thread loads and stores aiming for **efficient memory access (`vectorized & coalesced`)**.
-> 3. If CTA tile are (M,N); then blocksPerGrid should cover the entire tensor accordingly (ceil_div(X, M), ceil_div(Y, N)).
+> Threads are **1D** (`block=[128, 1, 1]`) and get their 2D meaning from `thr_layout`. The grid is **2D**, so `(bm, bn)` can be used directly as tile coordinates.
+>
+> **0. Know your tensor.** Which dtype, and which dimension is contiguous?
+>   A PyTorch tensor is row-major, so **N (the last dim)** is contiguous.
+>
+> **1. Per-thread vector: aim for 16 bytes along the contiguous dimension.**
+>   That's one 128-bit load per atom call: `val = (1, 16 // bytes_per_elem)`.
+>   - fp16/bf16 → `(1, 8)` · fp32 → `(1, 4)` · fp8 → `(1, 16)`
+>   - Match the atom: `num_bits_per_copy=128`.
+>
+> **2. Thread arrangement: thread ids along the contiguous dimension.**
+>   `thr = make_ordered_layout((rows, cols), order=(1, 0))`, with `rows × cols` = threads per block (128 or 256).
+>   - Neighbouring threads then read neighbouring 16-byte chunks, so loads are **coalesced and vectorized**.
+>   - Aim for at least a warp's worth of threads along N: 32 × 16 B = 512 contiguous bytes per row.
+>   - **One pass** = `thr × val` per mode. Here: `(8, 16) × (1, 8) = (8, 128)`.
+>
+> **3. CTA tile: a whole number of passes.**
+>   - The tile **must be a multiple of one pass**: `(32, 128)` = 4 passes of `(8, 128)` ✓, but `(32, 64)` ✗.
+>   - Values per thread = `size(tile) / threads`. Here `4096 / 128 = 32`, i.e. 4 atom calls of 8.
+>   - Bigger tiles give each thread more loads in flight and need fewer CTAs. But with a small tensor you may end up with fewer CTAs than SMs, leaving the GPU half idle.
+>
+> **4. Grid: cover the tensor with tiles.**
+>   `grid = [ceil_div(M, tile_M), ceil_div(N, tile_N), 1]`.
+>   - Use `ceil_div`, not `//`. Floor division silently drops the tail rows.
+>   - Put the dimension with more tiles on **x**: grid y and z are capped at 65535.
+>
+> **5. Tail: if the tensor isn't a multiple of the tile, predicate.**
+>   `ceil_div` gives the tail a CTA, but that CTA's tile hangs off the edge.
+>   Mask both copies with an identity tensor tiled and partitioned the same way (see the tail section), or you get silent corruption or an illegal memory access.
+>
+> **6. Verify.**
+>   - Print the partition: `tXgA` should be `((vals_per_atom), passes_M, passes_N)`.
+>   - Check the PTX for `ld.global.v4` / `st.global.v4` (128-bit vector access).
+>   - Compare with PyTorch, and run `compute-sanitizer` once with a non-multiple shape.
+>
+> **Worked example (this page):** fp16, row-major → `val = (1, 8)` → `thr = (8, 16)`, ids along N → pass `(8, 128)` → tile `(32, 128)` = 4 passes, 32 values per thread → grid `(ceil_div(M, 32), ceil_div(N, 128))`.
 
 
 ---
