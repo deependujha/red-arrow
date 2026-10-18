@@ -479,12 +479,23 @@ if __name__ == "__main__":
     launch(from_dlpack(A, assumed_align=16), from_dlpack(B, assumed_align=16))
     torch.cuda.synchronize()
     print("correct:", torch.equal(A, B))
+
+# --- output ---
+# correct: True
 ```
 
-> [!WARNING]
-> **Not yet verified:** the `SmemAllocator.allocate_tensor(...)` call and the `smem=` launch argument. Check them against the version you have installed.
-> Expected: `correct: True`.
-> *Replace this box with the real output after running.*
+> [!information]
+> `SmemAllocator` does not create memory; it suballocates the dynamic shared-memory buffer reserved at launch with `smem=...`. When you request a tensor aligned to 16 bytes, it advances its pointer to the next 16-byte boundary before placing the tensor.
+>
+> A `(32, 128)` tile of `fp16` values occupies `32 × 128 × 2 = 8192` bytes. The launch reserves an additional 128 bytes to allow for alignment padding. For example, if the buffer starts at an address ending in `0x08`, the allocator skips 8 bytes to reach the next 16-byte boundary:
+> 
+> ```
+> buffer start      0x...08
+> aligned start     0x...10   ← skipped 8 bytes
+> tile ends at      0x...10 + 8192
+> ```
+>
+> If `smem=...` is omitted or too small, the kernel may access invalid shared memory at runtime; this is not necessarily caught at compile time.
 
 > [!NOTE]
 > The read side here (32 threads down a row-major `(32,128)` smem tile) is likely to cause **bank conflicts**, because many threads hit the same banks.
