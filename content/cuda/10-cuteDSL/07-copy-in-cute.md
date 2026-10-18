@@ -432,7 +432,7 @@ def cpasync_kernel(mA: cute.Tensor, mB: cute.Tensor):
     bm, bn, _ = cute.arch.block_idx()
 
     # one CTA tile in shared memory, row-major
-    smem = cutlass.utils.SmemAllocator()
+    smem = cutlass.memory.SmemAllocator()
     sA = smem.allocate_tensor(
         mA.element_type, cute.make_ordered_layout(TILE, order=(1, 0)), byte_alignment=16
     )
@@ -685,6 +685,46 @@ check("read (32,4)", lambda t: (t // 4,  (t % 4)  * 8))   # 2-way
 
 > [!IMPORTANT]
 > **Interview version:** 32 banks × 4 B; `bank = (addr / 4) % 32`. A warp's request is served in phases of 128 B (8 threads for 16-byte loads). Same bank + different address + same phase = serialized. The tiled copy's thread layout decides which addresses share a phase, and the smem layout decides which bank each address lands in. Fix with a contiguous-per-phase thread layout, padding, or (best) a swizzled smem layout.
+
+---
+
+## Fixing the read with a swizzle
+
+The `(32,4)` read above has a 2-way bank conflict. A swizzle removes it without changing the copy code: only the way `sA` is allocated changes.
+
+For this tile and this read, the swizzle is **`Swizzle<1,5,2>`**: on odd rows, flip bit 5 of the element offset, which swaps the two 64 B halves of each 128 B line. For how it's derived, see the [worked example](../swizzle/#10-worked-example). For the general method, see [Swizzle](../swizzle/).
+
+```python
+# before: plain row-major tile
+sA = smem.allocate_tensor(
+    mA.element_type, cute.make_ordered_layout(TILE, order=(1, 0)), byte_alignment=16
+)
+
+# after: the same tile, composed with Swizzle<1,5,2>
+sA_layout = cute.make_composed_layout(
+    cute.make_swizzle(1, 5, 2), 0, cute.make_ordered_layout(TILE, order=(1, 0))
+)
+sA = smem.allocate_tensor(
+    mA.element_type,
+    sA_layout.outer,            # plain (32,128):(128,1)
+    byte_alignment=128,         # bank math needs a 128 B-aligned base
+    swizzle=sA_layout.inner,    # Swizzle<1,5,2>
+)
+```
+
+Everything else in the kernel stays as it is: the load plan, the read plan, `partition_S` / `partition_D`, and `cute.copy`.
+
+| Copy | No swizzle | `Swizzle<1,5,2>` |
+|---|---|---|
+| write: `cp.async`, threads `(8,16)` | 1-way | 1-way |
+| read: threads `(32,4)` | **2-way** | **1-way** |
+
+> [!IMPORTANT]
+> - **The swizzle belongs to `sA`, not to the copy.** Both copies partition the same `sA`, so writes and reads always agree on where `(r, c)` lives.
+> - One smem layout means **one swizzle for every copy that touches it**. Always re-check the other copies.
+> - `torch.equal(A, B)` stays `True`: the swizzle changes where data is stored, not the values.
+> - The `+128` slack in `launch` now matters: with `byte_alignment=128`, the allocator may skip up to 127 bytes.
+
 
 ---
 
