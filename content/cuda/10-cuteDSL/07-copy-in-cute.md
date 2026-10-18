@@ -503,6 +503,191 @@ if __name__ == "__main__":
 
 ---
 
+## Bank conflict in shared memory
+
+The `cp.async` example above is correct, but its read side is slow in a way that `torch.equal` will never show you: it has a **2-way bank conflict**. This section builds the mental model to see why just by reading the code.
+
+---
+
+#### 1. What `sA` really is
+
+- Following last example, `TILE = (32, 128)`; Each CTA reserves one `(32, 128)` fp16 tile in shared memory: `32 × 128 × 2 = 8192` bytes.
+- Shared memory has **no rows or columns**. It's one flat run of bytes. The layout decides how the 2D tile is flattened.
+- `make_ordered_layout(TILE, order=(1, 0))` is row-major, i.e. the layout `(32,128):(128,1)`. Row 0's 128 elements come first, then row 1, and so on.
+
+So element `(r, c)` lives at:
+
+$$
+\text{byte}(r, c) = \underbrace{(r \cdot 128 + c)}_{\text{element index}} \cdot \underbrace{2}_{\text{bytes per fp16}}
+$$
+
+- Example: `(1, 8)` → `(128 + 8) · 2 = 272`.
+- **One row = 256 bytes.** Remember this number.
+
+---
+
+#### 2. Banks
+
+Shared memory is split into **32 banks**, each **4 bytes** wide. Consecutive 4-byte words go to consecutive banks:
+
+$$
+\text{bank} = \left(\frac{\text{byte}}{4}\right) \bmod 32
+$$
+
+- Bytes 0–3 → bank 0, bytes 4–7 → bank 1, …, bytes 124–127 → bank 31, then byte 128 wraps back to bank 0.
+- Each bank serves **one word per pass**, so one pass delivers at most `32 × 4 = 128` bytes.
+
+Draw `sA` 128 bytes per line and each column *is* a bank:
+
+![smem lines and banks](/10-cutedsl/bank-smem-lines.svg)
+
+> [!IMPORTANT]
+> A row of `sA` is 256 B = 64 words = **exactly two laps** of the banks. So **every row starts at bank 0**, and column `c` of every row sits in the **same bank**.
+> Any row size that's a multiple of 128 B has this property. That alone isn't a bug, but it's the warning sign.
+
+##### When is it a conflict?
+
+Look at the threads being served **in the same pass**:
+
+| Situation | Result |
+|---|---|
+| all hit different banks | 1 pass ✓ |
+| several read the **same address** | broadcast, no conflict ✓ |
+| several hit the **same bank, different addresses** | **conflict**: the bank serves them one after another |
+
+**n-way conflict** = the busiest bank gets n different addresses = n passes instead of 1.
+
+---
+
+#### 3. Phases: who counts as "the same pass"
+
+One pass moves at most 128 B. If every thread in a warp asks for 16 B, that's 512 B, so the hardware splits the warp into groups that each fit in 128 B. Each group is a **phase**.
+
+| Bytes per thread (atom width) | Warp needs | Phases | Threads per phase |
+|---|---|---|---|
+| 4 (fp32, 32-bit) | 128 B | 1 | 32 |
+| 8 (64-bit) | 256 B | 2 | 16 |
+| 16 (`num_bits_per_copy=128`) | 512 B | 4 | **8** |
+
+In the story: a counter with **32 windows**, each handing out one 4-byte packet per round. Kids who each want 4 packets come up **8 at a time**. Two kids in the **same group** who need the same window cause a repeated round. Kids in different groups never compete.
+
+> [!warning]
+> - Conflicts are only counted **within a phase**. Threads 0 and 8 hitting the same bank is fine, because they're served in different rounds.
+> - The phase rule for 64/128-bit accesses isn't officially documented by NVIDIA, but it's the standard working model and matches what ncu reports.
+
+---
+
+#### 4. The tiled copy decides the access pattern
+
+Two things together decide which banks get hit:
+
+1. **`thr_layout` + `val_layout`** of the tiled copy → which `(r, c)` each thread touches **in one instruction**.
+2. **The smem layout** (`sA`) → which byte, and so which bank, each `(r, c)` lives at.
+
+In the kernel above, `sA` and the data are identical for both copies. Only (1) changes, and that alone decides conflict vs no conflict:
+
+![phase 0: load vs read](/10-cutedsl/bank-phase0-load-vs-read.svg)
+
+**Load `(8,16)`**: `thread t → (t // 16, (t % 16)·8)`
+
+- Phase 0 = threads 0–7 = row 0, cols 0–63 = bytes 0–127, contiguous.
+- Every bank is hit exactly once → **1 pass**.
+
+**Read `(32,4)`**: `thread t → (t // 4, (t % 4)·8)`
+
+| Thread | (r, c) | byte | banks |
+|---|---|---|---|
+| 0–3 | (0, 0 / 8 / 16 / 24) | 0–63 | 0–15 |
+| 4–7 | (1, 0 / 8 / 16 / 24) | 256–319 | **0–15 again** |
+
+- Only 4 threads per row → each row contributes just 64 B (half a lap).
+- The phase spans two rows, and row 1 restarts at bank 0.
+- So banks 0–15 get two addresses each, and banks 16–31 sit idle → **2-way, 8 passes instead of 4**.
+
+---
+
+#### 5. Which arrangements work for this tile?
+
+Constraint: `threads_per_row × 8 elements ≤ 128 columns`, and 128 threads in total.
+
+| Threads | Values / thread | Fits 128 cols? | Phase 0 | Result |
+|---|---|---|---|---|
+| (8,16) | 8 (16 B) | 16·8 = 128 ✓ | one row, 128 B contiguous | ✓ conflict-free |
+| (16,8) | 8 (16 B) | 8·8 = 64 ✓ | one row, 128 B contiguous | ✓ conflict-free |
+| (32,4) | 8 (16 B) | 4·8 = 32 ✓ | two rows, both on banks 0–15 | ✗ 2-way |
+| (4,32) | 8 (16 B) | 32·8 = 256 ✗ | doesn't tile `(32,128)` | invalid |
+| (4,32) | 4 (8 B, 64-bit atom) | 32·4 = 128 ✓ | 16 threads × 8 B, one row | ✓ conflict-free, but 2× more instructions |
+
+---
+
+#### 6. Spotting conflicts fast
+
+The one-sentence rule: **threads in the same phase must not want different addresses in the same bank.**
+
+Quick checklist, no table needed:
+
+1. **Atom width → phase size.** (phase size = 128/atom_width): 16 B → 8 threads, 8 B → 16, 4 B → 32.
+2. **Row size a multiple of 128 B?** Then every row starts at bank 0. Danger if a phase spans more than one row.
+3. **Does each phase read one contiguous 128 B chunk?** Yes → conflict-free, done.
+4. Otherwise, work out `byte → bank` for one phase, as in the table above.
+
+> [!TIP]
+> The precise condition is "the phase covers 32 **different** banks". Contiguous bytes within a row guarantee that. Merely being in the same row doesn't, if threads are spread out with gaps.
+
+---
+
+#### 7. Fixes
+
+1. **Change the thread arrangement** so each phase reads contiguous bytes, e.g. `(16,8)` or `(8,16)`.
+2. **Padding**: make each row longer so consecutive rows start at different banks.
+3. **Swizzling**: XOR some row bits into the column bits of the address. No extra memory, and alignment stays intact.
+
+![padding vs swizzle](/10-cutedsl/bank-fixes-pad-vs-swizzle.svg)
+
+| | Padding | Swizzle |
+|---|---|---|
+| For this read | +32 fp16 per row → 320 B rows → row 1 starts at bank 16 | `Swizzle<1,5,2>`: odd rows swap their two 64 B halves |
+| Extra smem | 25% here | none |
+| Gotchas | padding must keep 16 B alignment; +8 fp16 only shifts 4 banks (still 2-way) | layout must use the same swizzle for writes and reads |
+| Used by | quick hand-written kernels | CUTLASS / CuTe, TMA |
+
+> [!NOTE]
+> The classic textbook case: fp32 `float[32][32]`, each thread reads down a column → all 32 threads on one bank → **32-way**. Pad to `float[32][33]` and it's conflict-free; the swizzle equivalent is `Swizzle<5,0,5>`.
+
+---
+
+#### 8. Verifying
+
+**By hand / script (exact):**
+
+```python
+def check(name, thread_to_coord, row_elems=128, elem_bytes=2, vec_bytes=16):
+    phase = 32 // (vec_bytes // 4) if vec_bytes > 4 else 32
+    for p in range(32 // phase):                         # warp 0
+        banks = {}
+        for t in range(p * phase, (p + 1) * phase):
+            r, c = thread_to_coord(t)
+            word = (r * row_elems + c) * elem_bytes // 4
+            for w in range(max(1, vec_bytes // 4)):
+                banks.setdefault((word + w) % 32, set()).add(word + w)
+        print(name, f"phase {p}:", max(len(s) for s in banks.values()), "-way")
+
+check("load (8,16)", lambda t: (t // 16, (t % 16) * 8))   # 1-way
+check("read (32,4)", lambda t: (t // 4,  (t % 4)  * 8))   # 2-way
+```
+
+**With ncu:**
+
+- `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` (loads) and `..._op_st.sum` (stores) count conflicts.
+- `l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum` counts passes ("wavefronts"). Compare it to the ideal: instructions × phases.
+
+**By timing (A/B):** repeat the smem read in a loop with a dependency so it isn't optimized away, then compare `(32,4)` against `(16,8)`. Expect a clear gap, though not exactly 2×.
+
+> [!IMPORTANT]
+> **Interview version:** 32 banks × 4 B; `bank = (addr / 4) % 32`. A warp's request is served in phases of 128 B (8 threads for 16-byte loads). Same bank + different address + same phase = serialized. The tiled copy's thread layout decides which addresses share a phase, and the smem layout decides which bank each address lands in. Fix with a contiguous-per-phase thread layout, padding, or (best) a swizzled smem layout.
+
+---
+
 ## Quick recap
 
 | Piece | Answers |
