@@ -11,7 +11,7 @@ weight: 1010
 
 The **Tensor Memory Accelerator** is a copy engine in each SM. With `cp.async`, every thread moves 16 B and computes its own address. With TMA, **one thread** says "copy tile `(bm, bn)`", and the hardware does the address math, the edge clipping and the swizzle.
 
-![cp.async vs TMA](/10-cutedsl/tma-vs-cpasync.svg)
+![cp.async vs TMA](/10-cuteDSL/tma-vs-cpasync.svg)
 
 | | `cp.async` | TMA |
 |---|---|---|
@@ -120,7 +120,7 @@ A barrier object in smem (8 bytes) with three pieces of state:
 
 A round (**phase**) completes when **pending arrivals = 0 and tx count = 0**. The barrier then flips its phase bit and re-arms itself for the next round.
 
-![mbarrier phase](/10-cutedsl/tma-mbarrier-phase.svg)
+![mbarrier phase](/10-cuteDSL/tma-mbarrier-phase.svg)
 
 | Call | Who | Effect |
 |---|---|---|
@@ -330,7 +330,7 @@ sA = storage.sA.get_tensor(sA_layout.outer, swizzle=sA_layout.inner)
 - `get_tensor(outer, swizzle=inner)` attaches the swizzle to the **pointer**, so it acts on byte addresses. That's the convention these atoms use. Don't pass the composed layout as the layout here; that would apply `<3,4,3>` to element offsets.
 - Align the buffer to **1024 B** (one atom), as CUTLASS does for swizzled TMA buffers.
 
-![SW128 layout](/10-cutedsl/tma-sw128-layout.svg)
+![SW128 layout](/10-cuteDSL/tma-sw128-layout.svg)
 
 The 128 B inner-box limit splits the (32, 128) tile into **two boxes** of (32, 64). You don't handle that: the PTX simply has two loads and two stores.
 
