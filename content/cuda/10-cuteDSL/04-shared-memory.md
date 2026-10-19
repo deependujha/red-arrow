@@ -48,7 +48,7 @@ All DSL smem is carved out of **dynamic shared memory**. You allocate inside the
 ```python
 import cutlass
 import cutlass.cute as cute
-from cutlass.utils import SmemAllocator   # or cutlass.utils.SmemAllocator
+from cutlass.memory import SmemAllocator   # cutlass.utils.SmemAllocator is deprecated
 
 @cute.kernel
 def kernel(gA: cute.Tensor):
@@ -259,7 +259,7 @@ For wgmma / tcgen05 / TMA, use the arch helpers instead of hand-rolling, so the 
 - **M too small:** vectors get torn apart, so 128-bit loads become scalar.
 - **TMA alignment:** SW128 needs a 1024 B-aligned smem base, SW64 512 B, SW32 256 B.
 - **Element vs byte domain is the #1 bug.** `<3,4,3>` means SW128 in bytes, but int8 128 B in elements.
-  - **⚠ verify** the units of the `swizzle=` kwarg on `allocate_tensor` / `get_tensor`.
+  - The `swizzle=` kwarg on `allocate_tensor` applies to the **byte address** (checked in generated PTX), so for fp16 `M` goes up by 1 versus the element-unit swizzle.
   - The composed-layout path is in elements, so it's unambiguous.
 - **Profile:** in `ncu`, `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` (and `_st`) should be ≈ 0.
 

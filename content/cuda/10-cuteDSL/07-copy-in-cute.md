@@ -706,9 +706,8 @@ sA_layout = cute.make_composed_layout(
 )
 sA = smem.allocate_tensor(
     mA.element_type,
-    sA_layout.outer,            # plain (32,128):(128,1)
+    sA_layout,                  # composed layout: swizzle in ELEMENT units
     byte_alignment=128,         # bank math needs a 128 B-aligned base
-    swizzle=sA_layout.inner,    # Swizzle<1,5,2>
 )
 ```
 
@@ -718,6 +717,9 @@ Everything else in the kernel stays as it is: the load plan, the read plan, `par
 |---|---|---|
 | write: `cp.async`, threads `(8,16)` | 1-way | 1-way |
 | read: threads `(32,4)` | **2-way** | **1-way** |
+
+> [!WARNING]
+> **Units matter.** Passing the composed layout applies the swizzle to the **element offset**, which is what the derivation assumes. `allocate_tensor(..., swizzle=X)` instead applies it to the **byte address**, so reusing `<1,5,2>` there is a different swizzle: in the generated PTX, element `(1, 0)` lands at byte 256 with `swizzle=` and at byte 320 with the composed layout, and the read stays 2-way (the output is still correct). If you want the `swizzle=` form with fp16, `M` goes up by 1: `cute.make_swizzle(1, 6, 2)`.
 
 > [!IMPORTANT]
 > - **The swizzle belongs to `sA`, not to the copy.** Both copies partition the same `sA`, so writes and reads always agree on where `(r, c)` lives.

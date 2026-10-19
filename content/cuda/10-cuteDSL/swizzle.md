@@ -230,10 +230,11 @@ S = log2(X) - M
 sA_layout = cute.make_composed_layout(
     cute.make_swizzle(B, M, S), 0, cute.make_ordered_layout((R, C), order=(1, 0))
 )
-sA = smem.allocate_tensor(
-    dtype, sA_layout.outer, byte_alignment=128, swizzle=sA_layout.inner
-)
+sA = smem.allocate_tensor(dtype, sA_layout, byte_alignment=128)
 ```
+
+> [!WARNING]
+> **Units.** Everything on this page is derived in **element offsets**. Passing the composed layout to `allocate_tensor` keeps that. The `swizzle=` keyword applies the swizzle to the **byte address** instead, so the same `<B,M,S>` is a different swizzle there. To use it, convert to bytes: for `E`-byte elements, `M` goes up by `log2(E)` (fp16: `M+1`). A swizzle passed as `swizzle=<1,5,2>` for fp16 is not the one derived here; the byte-unit equivalent is `<1,6,2>`. The two forms were compared in the generated PTX: element `(1, 0)` lands at byte 256 with `swizzle=` and byte 320 with the composed layout.
 
 - `partition_S` / `partition_D` / `cute.copy` don't change. The swizzle lives inside `sA`, and every `(r, c) → address` lookup goes through it.
 - So every copy that touches `sA` goes through the same swizzle automatically. Writes and reads always agree on where `(r, c)` lives.
@@ -242,7 +243,7 @@ sA = smem.allocate_tensor(
 > **The swizzle belongs to the smem layout, not to the copy.**
 
 > [!NOTE]
-> The `allocate_tensor(..., swizzle=...)` form hasn't been run on a GPU here. If your CUTLASS version rejects it, CUTLASS's Ampere GEMM example uses a shared-storage struct instead: `storage.a.get_tensor(sA_layout.outer, swizzle=sA_layout.inner)`.
+> The composed-layout form was compiled to PTX and still issues 16 B `cp.async` and 128-bit `ld.shared.v4`. It has not been run on a GPU.
 
 Credit: the column-of-vectors formula and examples follow [Lei Mao's CuTe Swizzle post](https://leimao.github.io/blog/CuTe-Swizzle/).
 
