@@ -32,7 +32,7 @@ Assumptions:
 - **A3.** `W` is 4, 8 or 16 bytes, and each thread's `V` elements start at a column that's a multiple of `V`. Every access is then `W`-aligned. (Accesses smaller than 4 B share words between threads and follow different rules; this page doesn't cover them.)
 - **A4.** The smem base address is **128 B-aligned** (`byte_alignment=128` or more), so offset-based bank math equals real bank math.
 - **A5.** Phases: a warp's smem request moves at most 128 B per pass, so it's served in groups of `P = 128 / W` **consecutive lanes**. This is the standard working model; NVIDIA doesn't officially document it.
-- **A6.** The swizzle acts on the **element offset**, which is how CuTe applies a swizzle composed with an element layout.
+- **A6.** The swizzle acts on the **element offset**. That's what happens when the swizzle is part of the layout ([section 9](#9-using-it-in-cute-dsl)). A swizzle on the pointer acts on bytes instead.
 
 ---
 
@@ -220,11 +220,20 @@ S = log2(X) - M
 ```
 
 > [!WARNING]
-> Use this formula **only** when A7 and A8 hold. If a phase reads several chunks of the same row, some slot bits are already used, and the formula XORs into them for no benefit. That's exactly what happens with the `(32,4)` read in the [worked example](#10-worked-example).
+> Use this formula **only** when A7 and A8 hold. If a phase reads several chunks of the same row, some slot bits are already used, and the formula XORs into them for no benefit. That's exactly what happens with the `(32,4)` read in the [worked example](../swizzle-example/).
 
 ---
 
 ## 9. Using it in CuTe DSL
+
+There are two ways to attach a swizzle to smem, and **they use different units**:
+
+| How | Swizzle acts on | Use when |
+|---|---|---|
+| in the **layout**: `make_composed_layout(swizzle, 0, layout)` passed as the layout | **element offsets** | you derived `B, M, S` with this page's method |
+| on the **pointer**: `allocate_tensor(..., swizzle=...)` or `get_tensor(outer, swizzle=inner)` | **byte addresses** | TMA / WGMMA atoms (`Swizzle<B,4,3>`) |
+
+The method on this page works in element offsets, so put the swizzle in the layout:
 
 ```python
 sA_layout = cute.make_composed_layout(
@@ -232,6 +241,14 @@ sA_layout = cute.make_composed_layout(
 )
 sA = smem.allocate_tensor(dtype, sA_layout, byte_alignment=128)
 ```
+
+To use the pointer form instead, convert to bytes: multiplying offsets by `E` moves every bit up by `log2(E)`, so
+
+$$
+\text{Swizzle}\langle B, M, S\rangle_{\text{elements}} = \text{Swizzle}\langle B,\ M + \log_2 E,\ S\rangle_{\text{bytes}}
+$$
+
+For fp16, `<1,5,2>` on elements is `<1,6,2>` on bytes. `B` and `S` don't change.
 
 > [!WARNING]
 > **Units.** Everything on this page is derived in **element offsets**. Passing the composed layout to `allocate_tensor` keeps that. The `swizzle=` keyword applies the swizzle to the **byte address** instead, so the same `<B,M,S>` is a different swizzle there. To use it, convert to bytes: for `E`-byte elements, `M` goes up by `log2(E)` (fp16: `M+1`). A swizzle passed as `swizzle=<1,5,2>` for fp16 is not the one derived here; the byte-unit equivalent is `<1,6,2>`. The two forms were compared in the generated PTX: element `(1, 0)` lands at byte 256 with `swizzle=` and byte 320 with the composed layout.
@@ -241,9 +258,6 @@ sA = smem.allocate_tensor(dtype, sA_layout, byte_alignment=128)
 
 > [!IMPORTANT]
 > **The swizzle belongs to the smem layout, not to the copy.**
-
-> [!NOTE]
-> The composed-layout form was compiled to PTX and still issues 16 B `cp.async` and 128-bit `ld.shared.v4`. It has not been run on a GPU.
 
 Credit: the column-of-vectors formula and examples follow [Lei Mao's CuTe Swizzle post](https://leimao.github.io/blog/CuTe-Swizzle/).
 
