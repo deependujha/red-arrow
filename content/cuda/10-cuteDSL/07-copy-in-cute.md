@@ -692,7 +692,7 @@ check("read (32,4)", lambda t: (t // 4,  (t % 4)  * 8))   # 2-way
 
 The `(32,4)` read above has a 2-way bank conflict. A swizzle removes it without changing the copy code: only the way `sA` is allocated changes.
 
-For this tile and this read, the swizzle is **`Swizzle<1,5,2>`**: on odd rows, flip bit 5 of the element offset, which swaps the two 64 B halves of each 128 B line. For how it's derived, see the [worked example](../swizzle/#10-worked-example). For the general method, see [Swizzle](../swizzle/).
+For this tile and this read, the swizzle is **`Swizzle<1,5,2>`**: on odd rows, flip bit 5 of the element offset, which swaps the two 64 B halves of each 128 B line. For how it's derived, see the [worked example](../08-swizzle/#10-worked-example). For the general method, see [Swizzle](../08-swizzle/).
 
 ```python
 # before: plain row-major tile
@@ -741,9 +741,3 @@ Everything else in the kernel stays as it is: the load plan, the read plan, `par
 | `cute.copy` | fire the atom `CPY_M × CPY_N` times |
 | `cp.async` | gmem → smem directly; returns at once; **commit → wait → barrier** before reading |
 | double buffering | order tile k+1 while computing tile k; `wait_group(N)` keeps N in flight |
-
----
-
-## Next: TMA & swizzling
-
-*(to be continued)*

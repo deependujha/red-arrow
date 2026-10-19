@@ -4,7 +4,7 @@ type: docs
 math: true
 sidebar:
   open: false
-weight: 1008
+weight: 1009
 ---
 
 This page derives a swizzle from scratch for **any** smem tile and **any** tiled copy that reads or writes it. Every assumption is stated where it's used. For the same steps done with real numbers, see the [worked example](#10-worked-example).

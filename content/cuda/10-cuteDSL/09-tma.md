@@ -4,7 +4,7 @@ type: docs
 math: true
 sidebar:
   open: false
-weight: 1010
+weight: 1009
 ---
 
 **Hopper (sm_90) and newer only.** An L4 (Ada, sm_89) has `cp.async` but no TMA.
